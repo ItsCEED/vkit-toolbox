@@ -173,10 +173,10 @@ class AntiAFK:
             if PYDIRECTINPUT_AVAILABLE:
                 import pydirectinput as pdi
                 
-                # Start with S+A
+                # Start with S+d
                 pdi.keyDown('s')
-                pdi.keyDown('a')
-                console.print("✓ Anti-AFK: Starting with S+A", style="green")
+                pdi.keyDown('d')
+                console.print("✓ Anti-AFK: Starting with S+d", style="green")
                 
                 use_sa = True  # Track which combo we're using
                 
@@ -189,16 +189,16 @@ class AntiAFK:
                     
                     # Switch combo
                     if use_sa:
-                        # Switch from S+A to S+D
-                        pdi.keyUp('a')
-                        pdi.keyDown('d')
-                        console.print("◉ Anti-AFK: Switched to S+D", style="cyan")
-                        use_sa = False
-                    else:
-                        # Switch from S+D to S+A
+                        # Switch from S+d to S+a
                         pdi.keyUp('d')
                         pdi.keyDown('a')
                         console.print("◉ Anti-AFK: Switched to S+A", style="cyan")
+                        use_sa = False
+                    else:
+                        # Switch from S+a to S+d
+                        pdi.keyUp('a')
+                        pdi.keyDown('d')
+                        console.print("◉ Anti-AFK: Switched to S+D", style="cyan")
                         use_sa = True
                 
                 # Release all keys on stop
@@ -210,10 +210,10 @@ class AntiAFK:
                 from pynput.keyboard import Controller
                 kbd = Controller()
                 
-                # Start with S+A
+                # Start with S+D
                 kbd.press('s')
-                kbd.press('a')
-                console.print("✓ Anti-AFK: Starting with S+A", style="green")
+                kbd.press('d')
+                console.print("✓ Anti-AFK: Starting with S+D", style="green")
                 
                 use_sa = True
                 
@@ -227,15 +227,15 @@ class AntiAFK:
                     # Switch combo
                     if use_sa:
                         # Switch from S+A to S+D
-                        kbd.release('a')
-                        kbd.press('d')
-                        console.print("◉ Anti-AFK: Switched to S+D", style="cyan")
-                        use_sa = False
-                    else:
-                        # Switch from S+D to S+A
                         kbd.release('d')
                         kbd.press('a')
                         console.print("◉ Anti-AFK: Switched to S+A", style="cyan")
+                        use_sa = False
+                    else:
+                        # Switch from S+A to S+D
+                        kbd.release('a')
+                        kbd.press('d')
+                        console.print("◉ Anti-AFK: Switched to S+D", style="cyan")
                         use_sa = True
                 
                 # Release all keys on stop
@@ -266,7 +266,7 @@ class AntiAFK:
         self.thread = threading.Thread(target=self._hold_keys, daemon=True)
         self.thread.start()
         
-        console.print("✓ Anti-AFK [bold green]ENABLED[/bold green] (Alternating S+A ↔ S+D)", style="green")
+        console.print("✓ Anti-AFK [bold green]ENABLED[/bold green] (Alternating S+D ↔ S+A)", style="green")
         self.sound_manager.play_on()
         console.print()
     

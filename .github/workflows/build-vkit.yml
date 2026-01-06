@@ -7,11 +7,16 @@ on:
       - master
     tags:
       - 'v*.*.*'
+      - 'v*.*'
+      - 'v*'
   pull_request:
     branches:
       - main
       - master
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-windows:
@@ -26,8 +31,13 @@ jobs:
     - name: Extract version from main.py
       id: version
       run: |
-        # Extract VERSION from main.py (e.g., VERSION = "v2.5")
-        VERSION_RAW=$(sed -n 's/^VERSION = "v\([0-9.]*\)".*/\1/p' main.py)
+        # Extract VERSION from main.py (e.g., VERSION = "v2.6")
+        VERSION_RAW=$(grep -oP 'VERSION = "v\K[0-9.]+' main.py)
+        
+        if [ -z "$VERSION_RAW" ]; then
+          echo "::error::Failed to extract version from main.py"
+          exit 1
+        fi
         
         # Count dots to determine format
         DOT_COUNT=$(echo "$VERSION_RAW" | tr -cd '.' | wc -c)
@@ -37,13 +47,13 @@ jobs:
           # "2" → "2.0.0.0"
           VERSION_FULL="${VERSION_RAW}.0.0.0"
         elif [ $DOT_COUNT -eq 1 ]; then
-          # "2.5" → "2.5.0.0"
+          # "2.6" → "2.6.0.0"
           VERSION_FULL="${VERSION_RAW}.0.0"
         elif [ $DOT_COUNT -eq 2 ]; then
-          # "2.5.1" → "2.5.1.0"
+          # "2.6.1" → "2.6.1.0"
           VERSION_FULL="${VERSION_RAW}.0"
         else
-          # "2.5.1.3" → "2.5.1.3"
+          # "2.6.1.3" → "2.6.1.3"
           VERSION_FULL="$VERSION_RAW"
         fi
         
@@ -52,10 +62,10 @@ jobs:
         echo "✓ Extracted version from main.py: v$VERSION_RAW → $VERSION_FULL"
       shell: bash
     
-    - name: Set up Python 3.12.10
+    - name: Set up Python 3.12
       uses: actions/setup-python@v5
       with:
-        python-version: '3.12.10'
+        python-version: '3.12'
         cache: 'pip'
     
     - name: Install dependencies
@@ -113,8 +123,9 @@ jobs:
     - name: Rename executable with version (for releases)
       if: startsWith(github.ref, 'refs/tags/')
       run: |
-        mv VKit.exe VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe
+        cp VKit.exe VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe
         echo "✓ Renamed to VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe"
+        ls -lh VKit*.exe
       shell: bash
     
     - name: Upload artifact (dev builds)
@@ -135,12 +146,13 @@ jobs:
     
     - name: Create Release
       if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe
         draft: false
         prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
         generate_release_notes: true
+        fail_on_unmatched_files: true
         name: VKit Toolkit v${{ steps.version.outputs.VERSION_SHORT }}
         body: |
           ## 🚀 VKit Toolkit v${{ steps.version.outputs.VERSION_SHORT }}
