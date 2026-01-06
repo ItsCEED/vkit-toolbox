@@ -1,0 +1,10 @@
+rich
+pynput
+pywin32
+keyboard
+opencv-python
+numpy
+pillow
+PyDirectInput
+nuitka
+requests
