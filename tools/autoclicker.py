@@ -1,7 +1,9 @@
 import threading
 import time
 from rich.console import Console
+import random
 
+console = Console()
 try:
     import pydirectinput
     pydirectinput.PAUSE = 0.001
@@ -155,3 +157,130 @@ class SnackSpammer:
             self.stop()
         else:
             self.start()
+            
+class AntiAFK:
+    """Anti-AFK system - alternates S+A and S+D every 20-30 seconds"""
+    
+    def __init__(self, sound_manager):
+        self.sound_manager = sound_manager
+        self.active = False
+        self.thread = None
+        self.stop_event = threading.Event()
+    
+    def _hold_keys(self) -> None:
+        """Main anti-AFK loop - alternates between S+A and S+D"""
+        try:
+            if PYDIRECTINPUT_AVAILABLE:
+                import pydirectinput as pdi
+                
+                # Start with S+A
+                pdi.keyDown('s')
+                pdi.keyDown('a')
+                console.print("✓ Anti-AFK: Starting with S+A", style="green")
+                
+                use_sa = True  # Track which combo we're using
+                
+                while not self.stop_event.is_set():
+                    # Random wait between 20-30 seconds
+                    wait_time = random.uniform(20, 30)
+                    
+                    if self.stop_event.wait(wait_time):
+                        break
+                    
+                    # Switch combo
+                    if use_sa:
+                        # Switch from S+A to S+D
+                        pdi.keyUp('a')
+                        pdi.keyDown('d')
+                        console.print("◉ Anti-AFK: Switched to S+D", style="cyan")
+                        use_sa = False
+                    else:
+                        # Switch from S+D to S+A
+                        pdi.keyUp('d')
+                        pdi.keyDown('a')
+                        console.print("◉ Anti-AFK: Switched to S+A", style="cyan")
+                        use_sa = True
+                
+                # Release all keys on stop
+                pdi.keyUp('s')
+                pdi.keyUp('d')
+                pdi.keyUp('a')
+                
+            elif KEYBOARD_AVAILABLE:
+                from pynput.keyboard import Controller
+                kbd = Controller()
+                
+                # Start with S+A
+                kbd.press('s')
+                kbd.press('a')
+                console.print("✓ Anti-AFK: Starting with S+A", style="green")
+                
+                use_sa = True
+                
+                while not self.stop_event.is_set():
+                    # Random wait between 20-30 seconds
+                    wait_time = random.uniform(20, 30)
+                    
+                    if self.stop_event.wait(wait_time):
+                        break
+                    
+                    # Switch combo
+                    if use_sa:
+                        # Switch from S+A to S+D
+                        kbd.release('a')
+                        kbd.press('d')
+                        console.print("◉ Anti-AFK: Switched to S+D", style="cyan")
+                        use_sa = False
+                    else:
+                        # Switch from S+D to S+A
+                        kbd.release('d')
+                        kbd.press('a')
+                        console.print("◉ Anti-AFK: Switched to S+A", style="cyan")
+                        use_sa = True
+                
+                # Release all keys on stop
+                kbd.release('s')
+                kbd.release('d')
+                kbd.release('a')
+            
+            else:
+                console.print("[red]✗[/red] No keyboard library available", style="red")
+                
+        except Exception as e:
+            console.print(f"[red]✗[/red] Anti-AFK error: {e}", style="red")
+    
+    def toggle(self) -> None:
+        """Toggle anti-AFK on/off"""
+        if self.active:
+            self.stop()
+        else:
+            self.start()
+    
+    def start(self) -> None:
+        """Start anti-AFK"""
+        if self.active:
+            return
+        
+        self.active = True
+        self.stop_event.clear()
+        self.thread = threading.Thread(target=self._hold_keys, daemon=True)
+        self.thread.start()
+        
+        console.print("✓ Anti-AFK [bold green]ENABLED[/bold green] (Alternating S+A ↔ S+D)", style="green")
+        self.sound_manager.play_on()
+        console.print()
+    
+    def stop(self) -> None:
+        """Stop anti-AFK"""
+        if not self.active:
+            return
+        
+        self.active = False
+        self.stop_event.set()
+        
+        if self.thread:
+            self.thread.join(timeout=2.0)
+        
+        console.print("✓ Anti-AFK [bold red]DISABLED[/bold red]", style="green")
+        self.sound_manager.play_off()
+        console.print()

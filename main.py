@@ -1,3 +1,4 @@
+# Standard library imports
 import ctypes
 import os
 import socket
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from threading import Thread
 from typing import Optional
 
+# Third-party imports
 from pynput import keyboard
 from rich import box
 from rich.align import Align
@@ -18,9 +20,9 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+# Local application imports
 from assets.ui import OverlayManager
-from tools.autoclicker import AutoClicker, SnackSpammer, PYDIRECTINPUT_AVAILABLE
-
+from tools.autoclicker import AutoClicker, SnackSpammer, AntiAFK, PYDIRECTINPUT_AVAILABLE
 
 # Optional dependencies
 try:
@@ -41,7 +43,7 @@ console = Console()
 RULE_NAME = "gtanosavemode_rule"
 REMOTE_IP = "192.81.241.171"
 TEST_PORT = 80
-VERSION = "v2.4"
+VERSION = "v2.6"
 APP_TITLE = "VKit - Toolbox"
 GTA_PROCESS_NAME = "GTA5_Enhanced.exe"
 
@@ -53,12 +55,12 @@ DEBUG = False
 class HotkeyConfig:
     """Configuration for hotkey bindings"""
     TOGGLE_OVERLAY = keyboard.Key.f8
-    ENABLE_NOSAVE = keyboard.Key.f9
-    DISABLE_NOSAVE = keyboard.Key.f12
+    TOGGLE_NOSAVE = keyboard.Key.f9
     
     # Character keys (VK codes)
     AUTOCLICKER = (75, 'k')
     SNACK_SPAMMER = (67, 'c')
+    ANTI_AFK = (65, 'a')
     JOB_WARP = (74, 'j')
     DEBUG_TOGGLE = (68, 'd')
     KILL_GTA = (221, ']')
@@ -66,8 +68,8 @@ class HotkeyConfig:
     # Solver keys
     CASINO_FINGERPRINT = keyboard.Key.f5
     CASINO_KEYPAD = keyboard.Key.f6
-    CAYO_FINGERPRINT = keyboard.Key.f5  # with CTRL
-    CAYO_VOLTAGE = keyboard.Key.f6      # with CTRL
+    CAYO_FINGERPRINT = keyboard.Key.f5
+    CAYO_VOLTAGE = keyboard.Key.f6
 
 
 class SoundManager:
@@ -207,6 +209,13 @@ class FirewallManager:
         else:
             console.print("✗ Failed to delete firewall rule", style="red")
         console.print()
+    
+    def toggle_rule(self, manager: OverlayManager, sound_manager: SoundManager) -> None:
+        """Toggle firewall rule on/off"""
+        if self.rule_exists():
+            self.delete_rule(manager, sound_manager)
+        else:
+            self.add_rule(manager, sound_manager)
     
     def cleanup(self) -> bool:
         """Cleanup firewall rule on exit"""
@@ -391,14 +400,14 @@ class UIManager:
         
         # Core hotkeys
         hotkeys_table.add_row("CTRL + ALT + F8", "Toggle overlay mode (Full ↔ Mini)")
-        hotkeys_table.add_row("CTRL + ALT + F9", "Enable NOSAVE (Block IP)")
-        hotkeys_table.add_row("CTRL + ALT + F12", "Disable NOSAVE (Unblock IP)")
+        hotkeys_table.add_row("CTRL + ALT + F9", "Toggle NOSAVE (ON ↔ OFF)")
         hotkeys_table.add_row("CTRL + ALT + D", "🐛 Toggle Debug Mode")
         hotkeys_table.add_row("", "")
         
         # Tool hotkeys
         hotkeys_table.add_row("CTRL + ALT + K", "⚡ Toggle Fast Autoclicker (50 CPS)")
         hotkeys_table.add_row("CTRL + ALT + C", "🍔 Toggle Snack Spammer (Hold TAB)")
+        hotkeys_table.add_row("CTRL + ALT + A", "🎮 Toggle Anti-AFK (S+A ↔ S+D)")
         hotkeys_table.add_row("CTRL + ALT + ]", "💀 Kill GTA5 Process (Instant)")
         
         # Optional features
@@ -520,6 +529,7 @@ class HotkeyHandler:
         firewall_manager: FirewallManager,
         autoclicker: AutoClicker,
         snack_spammer: SnackSpammer,
+        anti_afk: AntiAFK,
         solver_manager: SolverManager,
         exploit_manager: ExploitManager,
     ):
@@ -528,6 +538,7 @@ class HotkeyHandler:
         self.firewall_manager = firewall_manager
         self.autoclicker = autoclicker
         self.snack_spammer = snack_spammer
+        self.anti_afk = anti_afk
         self.solver_manager = solver_manager
         self.exploit_manager = exploit_manager
         self.current_keys: set[object] = set()
@@ -582,6 +593,15 @@ class HotkeyHandler:
             else:
                 self.manager.show_notification("🍔 Snack Spammer OFF", "#ef4444")
         
+        # Anti-AFK toggle
+        elif vk_code == self.config.ANTI_AFK[0] or char == self.config.ANTI_AFK[1]:
+            console.print("[bold green]✓ CTRL+ALT+A DETECTED - TOGGLING ANTI-AFK[/bold green]")
+            self.anti_afk.toggle()
+            if self.anti_afk.active:
+                self.manager.show_notification("🎮 Anti-AFK ENABLED (S+A ↔ S+D)", "#10b981")
+            else:
+                self.manager.show_notification("🎮 Anti-AFK DISABLED", "#ef4444")
+        
         # Job warp exploit
         elif vk_code == self.config.JOB_WARP[0] or char == self.config.JOB_WARP[1]:
             self.exploit_manager.job_warp()
@@ -612,12 +632,9 @@ class HotkeyHandler:
         if ctrl and alt:
             if key == self.config.TOGGLE_OVERLAY:
                 self._toggle_overlay_mode()
-            elif key == self.config.ENABLE_NOSAVE:
-                self.firewall_manager.add_rule(self.manager, self.sound_manager)
-            elif key == self.config.DISABLE_NOSAVE:
-                self.firewall_manager.delete_rule(self.manager, self.sound_manager)
+            elif key == self.config.TOGGLE_NOSAVE:
+                self.firewall_manager.toggle_rule(self.manager, self.sound_manager)
             else:
-                # Handle character keys
                 vk_code = getattr(key, 'vk', None)
                 char = getattr(key, 'char', None)
                 self._handle_character_key(vk_code, char)
@@ -656,6 +673,7 @@ class HotkeyHandler:
 def cleanup(
     autoclicker: AutoClicker,
     snack_spammer: SnackSpammer,
+    anti_afk: AntiAFK,
     firewall_manager: FirewallManager
 ) -> None:
     """Cleanup all resources before exit"""
@@ -664,6 +682,9 @@ def cleanup(
     
     if snack_spammer.active:
         snack_spammer.stop()
+    
+    if anti_afk.active:
+        anti_afk.stop()
     
     if firewall_manager.cleanup():
         console.print("\n✓ Cleanup: Firewall rule removed", style="green")
@@ -691,6 +712,7 @@ def main() -> None:
     # Initialize tools
     autoclicker = AutoClicker(sound_manager)
     snack_spammer = SnackSpammer(sound_manager)
+    anti_afk = AntiAFK(sound_manager)
     
     # Initialize feature managers
     solver_manager = SolverManager(overlay_manager)
@@ -713,6 +735,7 @@ def main() -> None:
         firewall_manager,
         autoclicker,
         snack_spammer,
+        anti_afk,
         solver_manager,
         exploit_manager,
     )
@@ -730,7 +753,7 @@ def main() -> None:
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠[/yellow] Shutting down...", style="bold")
     finally:
-        cleanup(autoclicker, snack_spammer, firewall_manager)
+        cleanup(autoclicker, snack_spammer, anti_afk, firewall_manager)
         console.print("✓ Script terminated successfully\n", style="green bold")
 
 

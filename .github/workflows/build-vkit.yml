@@ -1,0 +1,175 @@
+name: Build VKit
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Extract version from main.py
+      id: version
+      run: |
+        # Extract VERSION from main.py (e.g., VERSION = "v2.5")
+        VERSION_RAW=$(grep -oP 'VERSION = "v\K[0-9.]+' main.py)
+        
+        # Count dots to determine format
+        DOT_COUNT=$(echo "$VERSION_RAW" | tr -cd '.' | wc -c)
+        
+        # Convert to 4-part version (required by Windows)
+        if [ $DOT_COUNT -eq 0 ]; then
+          # "2" → "2.0.0.0"
+          VERSION_FULL="${VERSION_RAW}.0.0.0"
+        elif [ $DOT_COUNT -eq 1 ]; then
+          # "2.5" → "2.5.0.0"
+          VERSION_FULL="${VERSION_RAW}.0.0"
+        elif [ $DOT_COUNT -eq 2 ]; then
+          # "2.5.1" → "2.5.1.0"
+          VERSION_FULL="${VERSION_RAW}.0"
+        else
+          # "2.5.1.3" → "2.5.1.3"
+          VERSION_FULL="$VERSION_RAW"
+        fi
+        
+        echo "VERSION=$VERSION_FULL" >> $GITHUB_OUTPUT
+        echo "VERSION_SHORT=$VERSION_RAW" >> $GITHUB_OUTPUT
+        echo "✓ Extracted version from main.py: v$VERSION_RAW → $VERSION_FULL"
+      shell: bash
+    
+    - name: Set up Python 3.12.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12.10'
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install nuitka ordered-set zstandard
+        pip install -r requirements.txt
+      shell: bash
+    
+    - name: Verify icon exists
+      run: |
+        if (!(Test-Path "icon.ico")) {
+          Write-Warning "⚠ icon.ico not found, build may use default icon"
+        } else {
+          Write-Host "✓ icon.ico found"
+        }
+      shell: pwsh
+    
+    - name: Build with Nuitka
+      run: |
+        echo "Building VKit v${{ steps.version.outputs.VERSION_SHORT }} (file version: ${{ steps.version.outputs.VERSION }})"
+        
+        python -m nuitka \
+          --standalone \
+          --onefile \
+          --windows-icon-from-ico=icon.ico \
+          --windows-uac-admin \
+          --enable-plugin=tk-inter \
+          --include-data-dir=assets=assets \
+          --output-filename=VKit.exe \
+          --product-name="GTA V VKit Toolkit" \
+          --product-version="${{ steps.version.outputs.VERSION }}" \
+          --file-version="${{ steps.version.outputs.VERSION }}" \
+          --file-description="GTA V VKit v${{ steps.version.outputs.VERSION_SHORT }}" \
+          --copyright="2026" \
+          --remove-output \
+          --assume-yes-for-downloads \
+          main.py
+      shell: bash
+    
+    - name: Verify build output
+      run: |
+        if (Test-Path "VKit.exe") {
+          Write-Host "✓ Build successful! VKit.exe created"
+          $size = (Get-Item "VKit.exe").Length / 1MB
+          Write-Host "  File size: $($size.ToString('F2')) MB"
+          Write-Host "  Version: v${{ steps.version.outputs.VERSION_SHORT }}"
+          Write-Host "  File version: ${{ steps.version.outputs.VERSION }}"
+        } else {
+          Write-Error "✗ Build failed! VKit.exe not found"
+          exit 1
+        }
+      shell: pwsh
+    
+    - name: Rename executable with version (for releases)
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        mv VKit.exe VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe
+        echo "✓ Renamed to VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe"
+      shell: bash
+    
+    - name: Upload artifact (dev builds)
+      if: "!startsWith(github.ref, 'refs/tags/')"
+      uses: actions/upload-artifact@v4
+      with:
+        name: VKit-Windows-dev-v${{ steps.version.outputs.VERSION_SHORT }}-${{ github.run_number }}
+        path: VKit.exe
+        retention-days: 7
+    
+    - name: Upload artifact (release builds)
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: actions/upload-artifact@v4
+      with:
+        name: VKit-Windows-v${{ steps.version.outputs.VERSION_SHORT }}
+        path: VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe
+        retention-days: 90
+    
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe
+        draft: false
+        prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+        generate_release_notes: true
+        name: VKit Toolkit v${{ steps.version.outputs.VERSION_SHORT }}
+        body: |
+          ## 🚀 VKit Toolkit v${{ steps.version.outputs.VERSION_SHORT }}
+          
+          ### 📦 Download
+          **VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe** - Standalone Windows executable
+          
+          ### 📋 Installation
+          1. Download the executable above
+          2. Right-click → **Run as Administrator**
+          3. First run may be slow (Windows Defender scan)
+          
+          ### ✨ Features
+          - 🔥 **NO SAVE MODE** - Firewall-based cloud save blocking
+          - ⚡ **Autoclicker** - 50 CPS with DirectInput support
+          - 🍔 **Snack Spammer** - Automated snack consumption
+          - 🎮 **Anti-AFK** - Alternating S+A ↔ S+D movement
+          - 🎰 **Heist Solvers** - Casino & Cayo Perico (optional)
+          - 🚀 **Job Warp** - Exploit integration (optional)
+          - 🔲 **Overlay** - Full/Mini mode with GTA V focus detection
+          
+          ### ⌨️ Hotkeys
+          - `CTRL+ALT+F9` - Toggle NO SAVE
+          - `CTRL+ALT+K` - Toggle Autoclicker
+          - `CTRL+ALT+C` - Toggle Snack Spammer
+          - `CTRL+ALT+A` - Toggle Anti-AFK
+          - `CTRL+ALT+F8` - Toggle Overlay Mode
+          
+          ### 📝 Full Changelog
+          See changes below ⬇️
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
