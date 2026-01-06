@@ -32,35 +32,31 @@ jobs:
       id: version
       run: |
         # Extract VERSION from main.py (e.g., VERSION = "v2.6")
-        VERSION_RAW=$(grep -oP 'VERSION = "v\K[0-9.]+' main.py)
-        
-        if [ -z "$VERSION_RAW" ]; then
-          echo "::error::Failed to extract version from main.py"
+        $content = Get-Content main.py -Raw
+        if ($content -match 'VERSION = "v([0-9.]+)"') {
+          $VERSION_RAW = $matches[1]
+          Write-Host "✓ Found version: $VERSION_RAW"
+        } else {
+          Write-Error "Failed to extract version from main.py"
           exit 1
-        fi
+        }
         
         # Count dots to determine format
-        DOT_COUNT=$(echo "$VERSION_RAW" | tr -cd '.' | wc -c)
+        $DOT_COUNT = ($VERSION_RAW.ToCharArray() | Where-Object {$_ -eq '.'}).Count
         
         # Convert to 4-part version (required by Windows)
-        if [ $DOT_COUNT -eq 0 ]; then
-          # "2" → "2.0.0.0"
-          VERSION_FULL="${VERSION_RAW}.0.0.0"
-        elif [ $DOT_COUNT -eq 1 ]; then
-          # "2.6" → "2.6.0.0"
-          VERSION_FULL="${VERSION_RAW}.0.0"
-        elif [ $DOT_COUNT -eq 2 ]; then
-          # "2.6.1" → "2.6.1.0"
-          VERSION_FULL="${VERSION_RAW}.0"
-        else
-          # "2.6.1.3" → "2.6.1.3"
-          VERSION_FULL="$VERSION_RAW"
-        fi
+        switch ($DOT_COUNT) {
+          0 { $VERSION_FULL = "$VERSION_RAW.0.0.0" }
+          1 { $VERSION_FULL = "$VERSION_RAW.0.0" }
+          2 { $VERSION_FULL = "$VERSION_RAW.0" }
+          default { $VERSION_FULL = $VERSION_RAW }
+        }
         
-        echo "VERSION=$VERSION_FULL" >> $GITHUB_OUTPUT
-        echo "VERSION_SHORT=$VERSION_RAW" >> $GITHUB_OUTPUT
-        echo "✓ Extracted version from main.py: v$VERSION_RAW → $VERSION_FULL"
-      shell: bash
+        # Set outputs
+        echo "VERSION=$VERSION_FULL" >> $env:GITHUB_OUTPUT
+        echo "VERSION_SHORT=$VERSION_RAW" >> $env:GITHUB_OUTPUT
+        Write-Host "✓ Extracted version from main.py: v$VERSION_RAW → $VERSION_FULL"
+      shell: pwsh
     
     - name: Set up Python 3.12
       uses: actions/setup-python@v5
@@ -73,7 +69,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install nuitka ordered-set zstandard
         pip install -r requirements.txt
-      shell: bash
+      shell: pwsh
     
     - name: Verify icon exists
       run: |
@@ -86,25 +82,25 @@ jobs:
     
     - name: Build with Nuitka
       run: |
-        echo "Building VKit v${{ steps.version.outputs.VERSION_SHORT }} (file version: ${{ steps.version.outputs.VERSION }})"
+        Write-Host "Building VKit v${{ steps.version.outputs.VERSION_SHORT }} (file version: ${{ steps.version.outputs.VERSION }})"
         
-        python -m nuitka \
-          --standalone \
-          --onefile \
-          --windows-icon-from-ico=icon.ico \
-          --windows-uac-admin \
-          --enable-plugin=tk-inter \
-          --include-data-dir=assets=assets \
-          --output-filename=VKit.exe \
-          --product-name="GTA V VKit Toolkit" \
-          --product-version="${{ steps.version.outputs.VERSION }}" \
-          --file-version="${{ steps.version.outputs.VERSION }}" \
-          --file-description="GTA V VKit v${{ steps.version.outputs.VERSION_SHORT }}" \
-          --copyright="2026" \
-          --remove-output \
-          --assume-yes-for-downloads \
+        python -m nuitka `
+          --standalone `
+          --onefile `
+          --windows-icon-from-ico=icon.ico `
+          --windows-uac-admin `
+          --enable-plugin=tk-inter `
+          --include-data-dir=assets=assets `
+          --output-filename=VKit.exe `
+          --product-name="GTA V VKit Toolkit" `
+          --product-version="${{ steps.version.outputs.VERSION }}" `
+          --file-version="${{ steps.version.outputs.VERSION }}" `
+          --file-description="GTA V VKit v${{ steps.version.outputs.VERSION_SHORT }}" `
+          --copyright="2026" `
+          --remove-output `
+          --assume-yes-for-downloads `
           main.py
-      shell: bash
+      shell: pwsh
     
     - name: Verify build output
       run: |
@@ -123,10 +119,10 @@ jobs:
     - name: Rename executable with version (for releases)
       if: startsWith(github.ref, 'refs/tags/')
       run: |
-        cp VKit.exe VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe
-        echo "✓ Renamed to VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe"
-        ls -lh VKit*.exe
-      shell: bash
+        Copy-Item VKit.exe VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe
+        Write-Host "✓ Copied to VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe"
+        Get-ChildItem VKit*.exe | Format-Table Name, Length
+      shell: pwsh
     
     - name: Upload artifact (dev builds)
       if: "!startsWith(github.ref, 'refs/tags/')"
