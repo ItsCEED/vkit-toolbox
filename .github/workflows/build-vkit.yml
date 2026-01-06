@@ -27,7 +27,7 @@ jobs:
       id: version
       run: |
         # Extract VERSION from main.py (e.g., VERSION = "v2.5")
-        VERSION_RAW=$(grep -oP 'VERSION = "v\K[0-9.]+' main.py)
+        VERSION_RAW=$(sed -n 's/^VERSION = "v\([0-9.]*\)".*/\1/p' main.py)
         
         # Count dots to determine format
         DOT_COUNT=$(echo "$VERSION_RAW" | tr -cd '.' | wc -c)
