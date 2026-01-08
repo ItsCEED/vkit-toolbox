@@ -1,6 +1,6 @@
-# 🎮 VKit - Toolbox v2.5
+# 🎮 VKit - Toolbox v3.0
 
-**Advanced GTA V utility suite with firewall control, heist solvers, autoclicker, and Discord webhook integration.**
+**Advanced GTA V utility suite with firewall control, heist solvers, autoclicker**
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/) 
 [![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)](https://www.microsoft.com/windows)
@@ -107,18 +107,17 @@ Right Click > Run As Administrator
 | Hotkey | Action |
 | :-- | :-- |
 | `CTRL + ALT + F8` | Toggle overlay mode (Full ↔ Mini) |
-| `CTRL + ALT + F9` | Enable NO SAVE (Block IP) |
-| `CTRL + ALT + F12` | Disable NO SAVE (Unblock IP) |
-| `CTRL + ALT + D` | Toggle debug mode |
+| `CTRL +  F8` | Toggle NO SAVE  |
+| `CTRL + SHIFT + D` | Toggle debug mode |
 
 ### Tools
 
 | Hotkey | Action |
 | :-- | :-- |
-| `CTRL + ALT + K` | Toggle autoclicker |
-| `CTRL + ALT + C` | Toggle snack spammer (Hold TAB) |
-| `CTRL + ALT + ]` | Kill GTA5 process instantly |
-| `CTRL + ALT + J` | Job Warp exploit (if available) |
+| `CTRL + K` | Toggle autoclicker |
+| `CTRL + C` | Toggle snack spammer (Hold TAB) |
+| `CTRL + SHIFT + Q]` | Kill GTA5 process instantly |
+| `CTRL + J` | Job Warp exploit (if available) |
 
 ### Heist Solvers
 

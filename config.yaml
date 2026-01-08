@@ -1,0 +1,19 @@
+firewall:
+  rule_name: gtanosavemode_rule
+  remote_ip: 192.81.241.171
+  test_port: 80
+require_game_focus: true
+auto_stop_on_unfocus: true
+hotkeys:
+  toggle_overlay: ctrl+f8
+  toggle_nosave: ctrl+f9
+  autoclicker: ctrl+k
+  snack_spammer: ctrl+c
+  anti_afk: ctrl+a
+  job_warp: ctrl+j
+  debug_toggle: ctrl+shift+d
+  kill_gta: ctrl+shift+q
+  casino_fingerprint: f5
+  casino_keypad: f6
+  cayo_fingerprint: ctrl+f5
+  cayo_voltage: ctrl+f6
