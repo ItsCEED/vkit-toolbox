@@ -53,7 +53,7 @@ console = Console()
 
 
 # Constants
-VERSION = "v3.1"
+VERSION = "v3.0"
 APP_TITLE = "VKit - Toolbox"
 GTA_PROCESS_NAME = "GTA5_Enhanced.exe"
 

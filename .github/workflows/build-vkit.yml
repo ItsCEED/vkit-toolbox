@@ -1,4 +1,4 @@
-name: Build and Release VKit
+name: Build VKit Release
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       version_override:
-        description: 'Override version (leave empty to use main.py VERSION)'
+        description: 'Override version (e.g., 3.1.0)'
         required: false
         type: string
 
@@ -19,153 +19,115 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
-    outputs:
-      VERSION_SHORT: ${{ steps.version.outputs.VERSION_SHORT }}
-      VERSION: ${{ steps.version.outputs.VERSION }}
-      BUILD_HASH: ${{ steps.verify.outputs.BUILD_HASH }}
-
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
-
+    
     - name: Extract version from main.py
       id: version
       run: |
-        # Extract VERSION from main.py (e.g., VERSION = "v2.9")
-        $content = Get-Content main.py -Raw
-        if ($content -match 'VERSION\s*=\s*"v?([0-9.]+)"') {
-          $VERSION_RAW = $matches[1]
-          Write-Host "✓ Found version in main.py: $VERSION_RAW"
-        } else {
-          Write-Error "Failed to extract version from main.py"
-          exit 1
-        }
-
-        # Override from workflow dispatch if provided
+        # Manual override for workflow_dispatch
         if ("${{ github.event.inputs.version_override }}" -ne "") {
-          $VERSION_RAW = "${{ github.event.inputs.version_override }}".TrimStart('v')
-          Write-Host "⚠ Version overridden to: $VERSION_RAW"
-        }
-
-        # Validate version format
-        if ($VERSION_RAW -notmatch '^[0-9]+(\.[0-9]+){0,3}$') {
-          Write-Error "Invalid version format: $VERSION_RAW (expected: X.Y or X.Y.Z)"
-          exit 1
-        }
-
-        # Convert to 4-part version (required by Windows)
-        $parts = $VERSION_RAW -split '\.'
-        $VERSION_FULL = switch ($parts.Count) {
-          1 { "$VERSION_RAW.0.0.0" }
-          2 { "$VERSION_RAW.0.0" }
-          3 { "$VERSION_RAW.0" }
-          default { $VERSION_RAW }
-        }
-
-        # Get tag version if available
-        $TAG_VERSION = "${{ github.ref_name }}"
-        if ($TAG_VERSION -match '^v?([0-9.]+)') {
-          $TAG_VERSION_NUM = $matches[1]
-          if ($TAG_VERSION_NUM -ne $VERSION_RAW) {
-            Write-Warning "⚠ Tag version ($TAG_VERSION_NUM) differs from main.py version ($VERSION_RAW)"
-            Write-Warning "  Using main.py version for build"
+          $VERSION_RAW = "${{ github.event.inputs.version_override }}"
+          Write-Host "✓ Using manual override: $VERSION_RAW"
+        } else {
+          # Extract VERSION from main.py (e.g., VERSION = "v2.6")
+          $content = Get-Content main.py -Raw
+          if ($content -match 'VERSION = "v([0-9.]+)"') {
+            $VERSION_RAW = $matches[1]
+            Write-Host "✓ Found version in main.py: $VERSION_RAW"
+          } else {
+            Write-Error "Failed to extract version from main.py"
+            exit 1
           }
         }
-
+        
+        # Count dots to determine format
+        $DOT_COUNT = ($VERSION_RAW.ToCharArray() | Where-Object {$_ -eq '.'}).Count
+        
+        # Convert to 4-part version (required by Windows)
+        switch ($DOT_COUNT) {
+          0 { $VERSION_FULL = "$VERSION_RAW.0.0.0" }
+          1 { $VERSION_FULL = "$VERSION_RAW.0.0" }
+          2 { $VERSION_FULL = "$VERSION_RAW.0" }
+          default { $VERSION_FULL = $VERSION_RAW }
+        }
+        
         # Set outputs
         echo "VERSION=$VERSION_FULL" >> $env:GITHUB_OUTPUT
         echo "VERSION_SHORT=$VERSION_RAW" >> $env:GITHUB_OUTPUT
-        echo "IS_PRERELEASE=${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}" >> $env:GITHUB_OUTPUT
-
-        Write-Host ""
-        Write-Host "📦 Build Configuration:"
-        Write-Host "   Version (short): v$VERSION_RAW"
-        Write-Host "   Version (full):  $VERSION_FULL"
-        Write-Host "   Tag: $TAG_VERSION"
-        Write-Host "   Pre-release: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}"
+        Write-Host "✓ Final version: v$VERSION_RAW → $VERSION_FULL"
       shell: pwsh
-
+    
     - name: Set up Python 3.12
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
         cache: 'pip'
-        cache-dependency-path: requirements.txt
-
-    - name: Cache Nuitka build files
+    
+    # Cache pip dependencies
+    - name: Cache pip packages
+      uses: actions/cache@v4
+      with:
+        path: ~\AppData\Local\pip\Cache
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    # Cache Nuitka build cache (huge speedup!)
+    - name: Cache Nuitka build
       uses: actions/cache@v4
       with:
         path: |
-          ~/.nuitka
-          build
-        key: ${{ runner.os }}-nuitka-${{ hashFiles('main.py', 'requirements.txt') }}
+          ~\AppData\Local\Nuitka
+          ~\.cache\Nuitka
+          main.build
+        key: ${{ runner.os }}-nuitka-${{ hashFiles('main.py', 'requirements.txt') }}-v2
         restore-keys: |
           ${{ runner.os }}-nuitka-
-
+    
+    # Cache C compiler (ccache for faster C compilation)
+    - name: Setup ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ${{ runner.os }}-ccache-vkit
+        max-size: 500M
+    
     - name: Install dependencies
       run: |
-        Write-Host "Installing Python dependencies..."
         python -m pip install --upgrade pip setuptools wheel
         pip install nuitka ordered-set zstandard
-
-        if (Test-Path "requirements.txt") {
-          pip install -r requirements.txt
-          Write-Host "✓ Installed requirements.txt"
-        } else {
-          Write-Warning "⚠ requirements.txt not found"
-        }
-
-        Write-Host ""
-        Write-Host "📋 Installed packages:"
-        pip list | Select-String -Pattern "nuitka|pynput|psutil|pyyaml|pywin32|rich"
+        pip install -r requirements.txt
+        
+        # Verify installations
+        Write-Host "`n✓ Installed packages:"
+        pip list | Select-String -Pattern "nuitka|pyyaml|rich|pynput|psutil|pywin32"
       shell: pwsh
-
-    - name: Verify required files
+    
+    - name: Verify icon exists
       run: |
-        $errors = @()
-
-        # Check icon
         if (!(Test-Path "icon.ico")) {
-          $errors += "⚠ icon.ico not found (will use default icon)"
+          Write-Warning "⚠ icon.ico not found, build will use default icon"
         } else {
-          $size = (Get-Item "icon.ico").Length / 1KB
-          Write-Host "✓ icon.ico found ($($size.ToString('F1')) KB)"
-        }
-
-        # Check assets folder
-        if (!(Test-Path "assets")) {
-          $errors += "⚠ assets folder not found"
-        } else {
-          $fileCount = (Get-ChildItem -Path "assets" -Recurse -File).Count
-          Write-Host "✓ assets folder found ($fileCount files)"
-        }
-
-        # Check main.py
-        if (!(Test-Path "main.py")) {
-          $errors += "✗ main.py not found (CRITICAL)"
-          exit 1
-        } else {
-          Write-Host "✓ main.py found"
-        }
-
-        if ($errors.Count -gt 0) {
-          Write-Host ""
-          Write-Host "Warnings:"
-          $errors | ForEach-Object { Write-Host "  $_" }
+          $iconSize = (Get-Item "icon.ico").Length
+          Write-Host "✓ icon.ico found ($iconSize bytes)"
         }
       shell: pwsh
-
-    - name: Build with Nuitka
+    
+    - name: Build with Nuitka (Optimized)
       run: |
-        Write-Host "🔨 Building VKit Toolkit..."
-        Write-Host "   Version: v${{ steps.version.outputs.VERSION_SHORT }}"
-        Write-Host "   File Version: ${{ steps.version.outputs.VERSION }}"
-        Write-Host ""
-
-        $startTime = Get-Date
-
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "Building VKit v${{ steps.version.outputs.VERSION_SHORT }}" -ForegroundColor Cyan
+        Write-Host "File version: ${{ steps.version.outputs.VERSION }}" -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+        
+        # Set ccache path
+        $env:CC = "ccache gcc"
+        $env:CXX = "ccache g++"
+        
         python -m nuitka `
           --standalone `
           --onefile `
@@ -174,76 +136,69 @@ jobs:
           --enable-plugin=tk-inter `
           --include-data-dir=assets=assets `
           --output-filename=VKit.exe `
-          --product-name="VKit Toolkit" `
+          --product-name="GTA V VKit Toolkit" `
           --product-version="${{ steps.version.outputs.VERSION }}" `
           --file-version="${{ steps.version.outputs.VERSION }}" `
-          --file-description="GTA V VKit Toolkit v${{ steps.version.outputs.VERSION_SHORT }}" `
-          --copyright="© 2026 ItsCEED" `
-          --company-name="ItsCEED" `
-          --remove-output `
+          --file-description="GTA V VKit v${{ steps.version.outputs.VERSION_SHORT }}" `
+          --copyright="2025-2026" `
+          --company-name="VKit" `
+          --trademarks="VKit" `
+          --disable-console `
           --assume-yes-for-downloads `
           --show-progress `
           --show-memory `
+          --jobs=2 `
           main.py
-
-        $duration = (Get-Date) - $startTime
-        Write-Host ""
-        Write-Host "✓ Build completed in $($duration.TotalMinutes.ToString('F1')) minutes"
+        
+        Write-Host "`n✓ Build completed!" -ForegroundColor Green
       shell: pwsh
-
-    - name: Verify and sign build
+    
+    - name: Verify build output
+      id: verify
       run: |
-        if (!(Test-Path "VKit.exe")) {
+        if (Test-Path "VKit.exe") {
+          Write-Host "✓ Build successful! VKit.exe created" -ForegroundColor Green
+          
+          $file = Get-Item "VKit.exe"
+          $sizeMB = [math]::Round($file.Length / 1MB, 2)
+          $hash = (Get-FileHash "VKit.exe" -Algorithm SHA256).Hash
+          
+          Write-Host "  📦 File: VKit.exe"
+          Write-Host "  📊 Size: $sizeMB MB"
+          Write-Host "  🔖 Version: v${{ steps.version.outputs.VERSION_SHORT }}"
+          Write-Host "  📝 File version: ${{ steps.version.outputs.VERSION }}"
+          Write-Host "  🔐 SHA256: $hash"
+          
+          # Save hash for release notes
+          echo "SHA256=$hash" >> $env:GITHUB_OUTPUT
+          echo "SIZE_MB=$sizeMB" >> $env:GITHUB_OUTPUT
+          
+          # Create checksum file
+          "$hash  VKit.exe" | Out-File -FilePath "VKit.exe.sha256" -Encoding ASCII
+          Write-Host "`n✓ Checksum file created: VKit.exe.sha256"
+        } else {
           Write-Error "✗ Build failed! VKit.exe not found"
           exit 1
         }
-
-        $file = Get-Item "VKit.exe"
-        $size = $file.Length / 1MB
-
-        Write-Host "✓ Build successful!"
-        Write-Host ""
-        Write-Host "📦 Build Information:"
-        Write-Host "   File: VKit.exe"
-        Write-Host "   Size: $($size.ToString('F2')) MB"
-        Write-Host "   Version: v${{ steps.version.outputs.VERSION_SHORT }}"
-        Write-Host "   File Version: ${{ steps.version.outputs.VERSION }}"
-        Write-Host "   Created: $($file.CreationTime)"
-
-        # Get file version info
-        $versionInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo("VKit.exe")
-        Write-Host ""
-        Write-Host "   Product Name: $($versionInfo.ProductName)"
-        Write-Host "   File Version: $($versionInfo.FileVersion)"
-        Write-Host "   Product Version: $($versionInfo.ProductVersion)"
-        Write-Host "   Description: $($versionInfo.FileDescription)"
-
-        # Calculate SHA256
-        $hash = (Get-FileHash -Path "VKit.exe" -Algorithm SHA256).Hash
-        Write-Host ""
-        Write-Host "   SHA256: $hash"
-        echo "BUILD_HASH=$hash" >> $env:GITHUB_OUTPUT
-      id: verify
       shell: pwsh
-
-    - name: Create versioned release file
+    
+    - name: Rename files for release
+      if: startsWith(github.ref, 'refs/tags/')
       run: |
-        $filename = "VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe"
-        Copy-Item "VKit.exe" $filename
-
-        Write-Host "✓ Created release file: $filename"
-
-        # Create checksum file
-        $hash = "${{ steps.verify.outputs.BUILD_HASH }}"
-        "$hash  $filename" | Out-File -FilePath "$filename.sha256" -Encoding ASCII
-
-        Write-Host "✓ Created checksum file: $filename.sha256"
-        Write-Host ""
-        Write-Host "📋 Release files:"
-        Get-ChildItem "VKit-v*.exe*" | Format-Table Name, Length, LastWriteTime -AutoSize
+        $version = "v${{ steps.version.outputs.VERSION_SHORT }}"
+        
+        # Rename executable
+        Copy-Item VKit.exe "VKit-$version.exe"
+        Copy-Item VKit.exe.sha256 "VKit-$version.exe.sha256"
+        
+        Write-Host "✓ Created release files:" -ForegroundColor Green
+        Get-ChildItem VKit-$version.* | ForEach-Object {
+          $size = [math]::Round($_.Length / 1KB, 2)
+          Write-Host "  - $($_.Name) ($size KB)"
+        }
       shell: pwsh
-
-    - name: Upload build artifact
+    
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: VKit-Windows-v${{ steps.version.outputs.VERSION_SHORT }}
@@ -252,116 +207,137 @@ jobs:
           VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe.sha256
         retention-days: 90
         compression-level: 9
-
-    - name: Generate release notes
-      id: release_notes
-      run: |
-        $version = "v${{ steps.version.outputs.VERSION_SHORT }}"
-        $filename = "VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe"
-        $hash = "${{ steps.verify.outputs.BUILD_HASH }}"
-        $date = Get-Date -Format "MMMM d, yyyy"
-
-        $notes = @"
-## 🚀 VKit Toolkit $version
-
-**Release Date:** $date
-
-### 📦 Download
-**$filename** - Standalone Windows executable (requires Administrator privileges)
-
-### 🔐 Verification
-``````
-SHA256: $hash
-``````
-
-### 📋 Installation
-1. Download **$filename** from the assets below
-2. Right-click → **Run as Administrator**
-3. First run may be slow due to Windows Defender scanning
-4. Configuration file (``config.yaml``) will be auto-created on first run
-
-### ✨ Features
-- **NOSAVE Mode** - Block Rockstar session saves
-- **Auto Clicker** - Ultra-fast 50 CPS clicker
-- **Snack Spammer** - Quick health recovery automation
-- **Anti-AFK** - Prevent idle kicks
-- **Job Warp** - Quick job teleportation exploit
-- **Heist Solvers** - Casino & Cayo Perico mini-game automation
-- **Configurable Hotkeys** - Customize all keybindings
-- **Auto-Stop on Alt+Tab** - Tools pause when GTA loses focus
-
-### ⚙️ System Requirements
-- Windows 10/11 (64-bit)
-- Administrator privileges required
-- Grand Theft Auto V Enhanced (Steam/Epic/Rockstar)
-
-### ⚠️ Important Notes
-- **Run as Administrator** is required for firewall rule management
-- Windows Defender may flag the executable (false positive) - this is normal for compiled Python applications
-- First launch takes longer due to Windows scanning
-
-### 📝 Changelog
-See full changelog below ⬇️
-"@
-
-        # Save to file for release
-        $notes | Out-File -FilePath "release_notes.md" -Encoding UTF8
-
-        # Also set as output (escaped for GitHub)
-        $notesEscaped = $notes -replace '`', '\`' -replace '"', '\"' -replace '\n', '%0A'
-        echo "NOTES<<EOF" >> $env:GITHUB_OUTPUT
-        echo "$notes" >> $env:GITHUB_OUTPUT
-        echo "EOF" >> $env:GITHUB_OUTPUT
-
-        Write-Host "✓ Release notes generated"
-      shell: pwsh
-
-    - name: Create GitHub Release
+    
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v2
       with:
         files: |
           VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe
           VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe.sha256
         draft: false
-        prerelease: ${{ steps.version.outputs.IS_PRERELEASE }}
+        prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
         generate_release_notes: true
         fail_on_unmatched_files: true
         name: VKit Toolkit v${{ steps.version.outputs.VERSION_SHORT }}
-        body_path: release_notes.md
-        make_latest: ${{ !steps.version.outputs.IS_PRERELEASE }}
+        body: |
+          ## 🚀 VKit Toolkit v${{ steps.version.outputs.VERSION_SHORT }}
+          
+          GTA V enhancement toolkit with session control, automation tools, and heist solvers.
+          
+          ---
+          
+          ### 📦 Download
+          
+          **Executable:** [`VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe`](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe)
+          
+          **File Info:**
+          - 📊 Size: `${{ steps.verify.outputs.SIZE_MB }} MB`
+          - 🔐 SHA256: `${{ steps.verify.outputs.SHA256 }}`
+          
+          ---
+          
+          ### 📋 Installation
+          
+          1. **Download** `VKit-v${{ steps.version.outputs.VERSION_SHORT }}.exe` from above
+          2. **Right-click** → **Run as Administrator** ⚠️
+          3. **First launch** may be slow (Windows Defender scanning)
+          4. **Config file** auto-generates on first run (`config.yaml`)
+          
+          ---
+          
+          ### ✨ Key Features
+          
+          #### 🛡️ Session Control
+          - **NOSAVE Mode** - Blocks save servers (test missions without consequences)
+          - **Configurable Hotkeys** - Customize all shortcuts via `config.yaml`
+          - **Focus Detection** - Auto-pause tools when Alt+Tab
+          
+          #### 🤖 Automation Tools
+          - **Fast Autoclicker** - 50 CPS for rapid inputs
+          - **Snack Spammer** - Auto-heal during combat (hold TAB)
+          - **Anti-AFK Bot** - Stay online without idle kick
+          
+          #### 🎮 Heist Assistance
+          - **Casino Heist** - Fingerprint & Keypad solvers
+          - **Cayo Perico** - Fingerprint & Voltage solvers
+          - **Job Warp** - Instant mission teleport (if available)
+          
+          #### 🎨 UI/UX
+          - **Overlay Manager** - Full or mini display modes
+          - **Rich Console** - Colorful, informative output
+          - **Update Checker** - Automatic version notifications
+          
+          ---
+          
+          ### 🔐 Security & Safety
+          
+          - ✅ **Open Source** - Inspect code at [github.com/${{ github.repository }}](https://github.com/${{ github.repository }})
+          - ✅ **No Telemetry** - Zero data collection
+          - ✅ **Admin Required** - For firewall rule management only
+          - ⚠️ **Use Responsibly** - Automation = ban risk in public sessions
+          
+          ---
+          
+          ### 🐛 Troubleshooting
+          
+          **Hotkeys not working?**
+          - Ensure GTA V is focused (`require_game_focus: true` in config)
+          - Check for conflicts with Discord/OBS overlays
+          - Enable debug mode: `Ctrl+Shift+D`
+          
+          **NOSAVE mode failing?**
+          - Must run as Administrator
+          - Check Windows Firewall isn't disabled
+          - Verify IP in `config.yaml` matches your region
+          
+          **Config not saving?**
+          - Config must be in same folder as `VKit.exe`
+          - Check folder write permissions
+          - Delete `config.yaml` to regenerate defaults
+          
+          ---
+          
+          ### 📝 Configuration
+          
+          Edit `config.yaml` to customize:
+          - Hotkey bindings
+          - Focus detection behavior
+          - Firewall settings
+          - Tool auto-stop on unfocus
+          
+          **Full documentation:** See `config.yaml` comments
+          
+          ---
+          
+          ### 🔄 Changelog
+          
+          See auto-generated release notes below ⬇️
+          
+          ---
+          
+          ### ⚖️ Disclaimer
+          
+          This tool is for **educational and testing purposes**. Use at your own risk.
+          - Not affiliated with Rockstar Games
+          - May violate Terms of Service
+          - Can result in account bans
+          - No warranty provided
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Upload release notes artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: release-notes-v${{ steps.version.outputs.VERSION_SHORT }}
-        path: release_notes.md
-        retention-days: 90
-
-  # Notify on completion
-  notify:
-    needs: build-windows
-    runs-on: ubuntu-latest
-    if: always()
-
-    steps:
-    - name: Build Status Summary
+    
+    - name: Build Summary
+      if: always()
       run: |
-        echo "## 📊 Build Summary" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Version:** v${{ needs.build-windows.outputs.VERSION_SHORT }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Status:** ${{ needs.build-windows.result }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Tag:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-
-        if [ "${{ needs.build-windows.result }}" = "success" ]; then
-          echo "✅ **Build completed successfully!**" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🔗 [View Release](https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }})" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "❌ **Build failed!**" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🔗 [View Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
-        fi
+        Write-Host "`n========================================" -ForegroundColor Cyan
+        Write-Host "Build Summary" -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "Version: v${{ steps.version.outputs.VERSION_SHORT }}"
+        Write-Host "Status: ${{ job.status }}"
+        Write-Host "Trigger: ${{ github.event_name }}"
+        if (Test-Path "VKit.exe") {
+          $size = [math]::Round((Get-Item "VKit.exe").Length / 1MB, 2)
+          Write-Host "Output: VKit.exe ($size MB)"
+        }
+        Write-Host "========================================" -ForegroundColor Cyan
+      shell: pwsh
