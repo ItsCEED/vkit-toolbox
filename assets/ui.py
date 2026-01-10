@@ -1,7 +1,3 @@
-"""
-GTA V Style Overlay - Optimized Edition
-Performance optimizations with LRU cache, buffer reuse, and proper cleanup
-"""
 import ctypes
 import math
 import time
@@ -34,14 +30,13 @@ C_RED_DANGER = "#ff3860"
 C_RED_BRIGHT = "#E03232"
 C_PURPLE = "#c084fc"
 
-FONT_TITLE = ("Segoe UI", 18, "bold")
-FONT_HEADER = ("Segoe UI", 11, "bold")
-FONT_BODY = ("Segoe UI", 9, "bold")
-FONT_SMALL = ("Segoe UI", 7, "bold")
-FONT_TINY = ("Segoe UI", 6)
+FONT_TITLE = ("Franklin Gothic Demi", 18, "bold")
+FONT_HEADER = ("Franklin Gothic Medium", 11, "bold")
+FONT_BODY = ("Franklin Gothic Medium", 9, "bold")
+FONT_SMALL = ("Franklin Gothic Medium", 7, "bold")
+FONT_TINY = ("Franklin Gothic Book", 6)
 
 GTA_WINDOW_TITLES = ["Grand Theft Auto V", "GTA V", "gta5.exe"]
-
 
 
 class Animator:
@@ -67,7 +62,6 @@ class Animator:
         c1 = 1.70158
         c3 = c1 + 1
         return 1 + c3 * pow(x - 1, 3) + c1 * pow(x - 1, 2)
-
 
 
 class ColorUtil:
@@ -123,7 +117,6 @@ class ColorUtil:
         g = min(255, int(rgb[1] * intensity))
         b = min(255, int(rgb[2] * intensity))
         return ColorUtil.rgb_to_hex((r, g, b))
-
 
 
 class GTAInteractionMenu(tk.Frame):
@@ -218,24 +211,21 @@ class GTAInteractionMenu(tk.Frame):
         eased = Animator.ease_out_back(progress)
         color = ColorUtil.interpolate(self.current_color, self.target_color, eased)
 
-        try:
-            self._apply_color(color)
+        self._apply_color(color)
 
-            # Shake effect
-            if self.shake_amount > 0:
-                new_shake = math.sin(self.anim_step * 2) * self.shake_amount
-                shake_delta = new_shake - self.shake_offset
+        # Shake effect
+        if self.shake_amount > 0:
+            new_shake = math.sin(self.anim_step * 2) * self.shake_amount
+            shake_delta = new_shake - self.shake_offset
 
-                self.canvas.move(self.status_text, shake_delta, 0)
-                self.canvas.move(self.status_glow, shake_delta, 0)
+            self.canvas.move(self.status_text, shake_delta, 0)
+            self.canvas.move(self.status_glow, shake_delta, 0)
 
-                self.shake_offset = new_shake
-                self.shake_amount *= 0.85
+            self.shake_offset = new_shake
+            self.shake_amount *= 0.85
 
-            self.anim_step += 1
-            self.after(16, self._animate_color)
-        except tk.TclError:
-            pass
+        self.anim_step += 1
+        self.after(16, self._animate_color)
 
     def _apply_color(self, color: str):
         """Apply color to all elements"""
@@ -245,9 +235,8 @@ class GTAInteractionMenu(tk.Frame):
         self.canvas.itemconfig(self.inner_accent, fill=color)
 
 
-
 class GTAMiniIndicator(tk.Frame):
-    """Enhanced mini with rotating ring and status letter"""
+    """OPTIMIZED mini with rotating ring and throttled updates"""
 
     def __init__(self, parent):
         super().__init__(parent, bg=C_PURE_BLACK)
@@ -320,10 +309,28 @@ class GTAMiniIndicator(tk.Frame):
         self.status = "OFF"
         self.base_color = C_GREEN_BRIGHT
         self._frame_counter = 0
-        self._update_interval = 1
+        self._update_interval = 2  # OPTIMIZED: 30 FPS instead of 60
+
+        # OPTIMIZATION: Pre-allocate buffers
+        self._coords_buffer = [(0, 0.0) for _ in range(len(layer_config))]
+        self._color_buffer = [(0, "") for _ in range(len(layer_config))]
+
+        # OPTIMIZATION: Cache last alpha values
+        self._last_alphas = [0.0] * len(layer_config)
+        self._alpha_threshold = 0.015  # Only update if change > 1.5%
+
+        # OPTIMIZATION: Pre-calculate cos values for layers
+        self._layer_cos = [math.cos(i * 0.3) for i in range(len(layer_config))]
+
+        # Track if pulse is actually changing visuals
+        self._pulse_dirty = True
+        self._pulse_skip_counter = 0
 
     def update_status(self, status: str):
         """Update colors and letter"""
+        if self.status == status:
+            return  # Already set
+
         self.status = status
         self.base_color = C_RED_BRIGHT if status == "ON" else C_GREEN_BRIGHT
         letter = "E" if status == "ON" else "D"
@@ -332,78 +339,109 @@ class GTAMiniIndicator(tk.Frame):
         self.canvas.itemconfig(self.ring_arc, outline=self.base_color)
         self.canvas.itemconfig(self.status_letter, text=letter)
 
+        # OPTIMIZATION: Batch color updates
+        updates = []
         for layer_data in self.glow_layers:
             color = ColorUtil.with_alpha(self.base_color, layer_data['base_alpha'])
-            self.canvas.itemconfig(layer_data['id'], fill=color)
+            updates.append((layer_data['id'], color))
 
-    def pulse(self):
-        """Optimized breathing with rotating ring"""
+        for layer_id, color in updates:
+            self.canvas.itemconfig(layer_id, fill=color)
+
+        # Reset alpha cache
+        for i in range(len(self._last_alphas)):
+            self._last_alphas[i] = 0.0
+
+        self._pulse_dirty = True
+
+    def pulse(self) -> bool:
+        """OPTIMIZED breathing with frame skipping - returns True if visually changed"""
         self._frame_counter += 1
+
+        # OPTIMIZATION: Skip frames
         if self._frame_counter % self._update_interval != 0:
-            return
+            return False
+
+        # OPTIMIZATION: Skip occasional frames when pulse is stable
+        self._pulse_skip_counter += 1
+        if self._pulse_skip_counter % 10 == 0 and not self._pulse_dirty:
+            # Every 10th frame, check if we should keep animating
+            sin_check = abs(math.sin(self.breath_time))
+            if 0.3 < sin_check < 0.7:  # Mid-cycle, less noticeable
+                return False
 
         self.breath_time += 0.025
         self.shimmer_time += 0.040
         self.ring_rotation += 2.5
 
-        # Pre-calculate sine values
+        # Pre-calculate sine values once
         sin_breath = math.sin(self.breath_time)
         sin_shimmer = math.sin(self.shimmer_time * 1.6)
 
-        try:
-            # Batch updates
-            coords_updates = []
-            color_updates = []
+        # Track if any visual change occurred
+        visual_change = False
 
-            for layer_data in self.glow_layers:
-                i = layer_data['index']
-                base_radius = layer_data['base_radius']
-                base_alpha = layer_data['base_alpha']
-                layer_id = layer_data['id']
+        # OPTIMIZATION: Batch buffer updates
+        buffer_idx = 0
+        for layer_data in self.glow_layers:
+            i = layer_data['index']
+            base_radius = layer_data['base_radius']
+            base_alpha = layer_data['base_alpha']
+            layer_id = layer_data['id']
 
-                breath = sin_breath * math.cos(i * 0.3) * 1.6
-                wave = math.sin(self.breath_time * 1.4 + i * 0.4) * 0.8
-                offset = (breath + wave) * (1 + i * 0.1)
-                radius = base_radius + offset
+            # Use pre-calculated cos
+            breath = sin_breath * self._layer_cos[i] * 1.6
+            wave = math.sin(self.breath_time * 1.4 + i * 0.4) * 0.8
+            offset = (breath + wave) * (1 + i * 0.1)
+            radius = base_radius + offset
 
-                alpha_pulse = math.sin(self.breath_time * 1.2 + i * 0.2) * 0.12
-                dynamic_alpha = max(0.05, min(1.0, base_alpha + alpha_pulse))
+            alpha_pulse = math.sin(self.breath_time * 1.2 + i * 0.2) * 0.12
+            dynamic_alpha = max(0.05, min(1.0, base_alpha + alpha_pulse))
 
+            # OPTIMIZATION: Only update color if alpha changed significantly
+            if abs(dynamic_alpha - self._last_alphas[i]) > self._alpha_threshold:
                 color = ColorUtil.with_alpha(self.base_color, dynamic_alpha)
-                coords_updates.append((layer_id, radius))
-                color_updates.append((layer_id, color))
+                self._color_buffer[buffer_idx] = (layer_id, color)
+                self._last_alphas[i] = dynamic_alpha
+                visual_change = True
+            else:
+                self._color_buffer[buffer_idx] = (layer_id, None)
 
-            # Apply updates
-            for layer_id, radius in coords_updates:
-                self.canvas.coords(
-                    layer_id,
-                    self.center - radius, self.center - radius,
-                    self.center + radius, self.center + radius
-                )
+            self._coords_buffer[buffer_idx] = (layer_id, radius)
+            buffer_idx += 1
 
-            for layer_id, color in color_updates:
-                self.canvas.itemconfig(layer_id, fill=color)
-
-            # Core breathing
-            core_breath = sin_breath * 0.8
+        # OPTIMIZATION: Batch apply coord updates
+        for layer_id, radius in self._coords_buffer:
             self.canvas.coords(
-                self.core,
-                self.center - 8 - core_breath, self.center - 8 - core_breath,
-                self.center + 8 + core_breath, self.center + 8 + core_breath
+                layer_id,
+                self.center - radius, self.center - radius,
+                self.center + radius, self.center + radius
             )
 
-            # Highlight shimmer
-            shimmer = (sin_shimmer + 1) / 2
-            shimmer_alpha = 0.7 + shimmer * 0.3
-            shimmer_color = ColorUtil.with_alpha("#ffffff", shimmer_alpha)
-            self.canvas.itemconfig(self.highlight, fill=shimmer_color)
+        # OPTIMIZATION: Only apply color updates if changed
+        for layer_id, color in self._color_buffer:
+            if color is not None:
+                self.canvas.itemconfig(layer_id, fill=color)
 
-            # Rotate ring
-            self.canvas.itemconfig(self.ring_arc, start=self.ring_rotation % 360)
+        # Core breathing (always update - small and visible)
+        core_breath = sin_breath * 0.8
+        self.canvas.coords(
+            self.core,
+            self.center - 8 - core_breath, self.center - 8 - core_breath,
+            self.center + 8 + core_breath, self.center + 8 + core_breath
+        )
 
-        except tk.TclError:
-            pass
+        # Highlight shimmer
+        shimmer = (sin_shimmer + 1) / 2
+        shimmer_alpha = 0.7 + shimmer * 0.3
+        shimmer_color = ColorUtil.with_alpha("#ffffff", shimmer_alpha)
+        self.canvas.itemconfig(self.highlight, fill=shimmer_color)
 
+        # Rotate ring
+        self.canvas.itemconfig(self.ring_arc, start=self.ring_rotation % 360)
+
+        self._pulse_dirty = visual_change
+        return True  # Return True when actually animating
 
 
 class GTANotification(tk.Frame):
@@ -470,9 +508,8 @@ class GTANotification(tk.Frame):
         self.canvas.itemconfig(self.icon_circle, outline=accent_color)
 
 
-
 class OverlayManager:
-    """Optimized overlay with LRU cache and proper cleanup"""
+    """FULLY OPTIMIZED overlay with adaptive FPS and resource management"""
 
     # Animation constants
     MENU_Y_VISIBLE = 40
@@ -485,7 +522,8 @@ class OverlayManager:
     NOTIF_ANIM_SPEED = 0.22
 
     # Performance constants
-    TARGET_FPS = 60
+    TARGET_FPS_ACTIVE = 60
+    TARGET_FPS_IDLE = 30
     WINDOW_CHECK_INTERVAL = 0.5
     POSITION_UPDATE_THRESHOLD = 10
 
@@ -537,14 +575,21 @@ class OverlayManager:
         self.notif_x_current = self.NOTIF_X_HIDDEN
         self.notif_x_target = self.NOTIF_X_HIDDEN
 
-        # Optimization
+        # Optimization: Dirty flags
         self._animation_dirty = {'menu': True, 'notification': False, 'pulse': False}
         self._gta_hwnd = None
         self._last_window_check = 0
         self._window_check_interval = self.WINDOW_CHECK_INTERVAL
         self._last_geometry = None
         self._last_status = None
-        self._frame_time = 1000 / self.TARGET_FPS
+
+        # OPTIMIZATION: Adaptive FPS
+        self._frames_since_change = 0
+        self._idle_threshold = 30  # Frames before considering "idle"
+        self._current_fps_target = self.TARGET_FPS_IDLE
+
+        # OPTIMIZATION: Geometry string cache
+        self._geometry_cache = {}
 
         # Window buffer for reuse
         self._window_buffer = ctypes.create_unicode_buffer(256)
@@ -612,8 +657,18 @@ class OverlayManager:
 
         self.root.after(500, self.check_gta_focused)
 
+    def _get_geometry_string(self, w: int, h: int, x: int, y: int) -> str:
+        """OPTIMIZED: Cache geometry strings"""
+        key = (w, h, x, y)
+        if key not in self._geometry_cache:
+            # Cache size limit
+            if len(self._geometry_cache) > 100:
+                self._geometry_cache.clear()
+            self._geometry_cache[key] = f"{w}x{h}+{x}+{y}"
+        return self._geometry_cache[key]
+
     def _update_overlay_position(self):
-        """Throttled position updates"""
+        """OPTIMIZED: Only update when position actually changes"""
         if not win32gui or not self._gta_hwnd:
             return
 
@@ -621,36 +676,59 @@ class OverlayManager:
             rect = win32gui.GetWindowRect(self._gta_hwnd)
             new_geometry = (rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1])
 
-            if self._last_geometry != new_geometry:
-                x, y, w, h = new_geometry
+            if self._last_geometry == new_geometry:
+                return  # No change, skip
 
-                if (self._last_geometry is None or
-                    abs(x - self._last_geometry[0]) > self.POSITION_UPDATE_THRESHOLD or
-                    abs(y - self._last_geometry[1]) > self.POSITION_UPDATE_THRESHOLD or
-                    abs(w - self._last_geometry[2]) > self.POSITION_UPDATE_THRESHOLD or
-                    abs(h - self._last_geometry[3]) > self.POSITION_UPDATE_THRESHOLD):
+            x, y, w, h = new_geometry
 
-                    self.root.geometry(f"{w}x{h}+{x}+{y}")
-                    self._last_geometry = new_geometry
+            # OPTIMIZATION: Threshold check before creating geometry string
+            if self._last_geometry is not None:
+                dx = abs(x - self._last_geometry[0])
+                dy = abs(y - self._last_geometry[1])
+                dw = abs(w - self._last_geometry[2])
+                dh = abs(h - self._last_geometry[3])
+
+                if (dx <= self.POSITION_UPDATE_THRESHOLD and 
+                    dy <= self.POSITION_UPDATE_THRESHOLD and 
+                    dw <= self.POSITION_UPDATE_THRESHOLD and 
+                    dh <= self.POSITION_UPDATE_THRESHOLD):
+                    return  # Change too small
+
+            # Use cached geometry string
+            geometry_str = self._get_geometry_string(w, h, x, y)
+            self.root.geometry(geometry_str)
+            self._last_geometry = new_geometry
         except Exception:
             pass
 
     def animate_loop(self):
-        """Optimized animation with adaptive frame rate"""
+        """OPTIMIZED animation with adaptive frame rate"""
         start_time = time.time()
 
-        menu_updated = self._animate_menu()
-        notif_updated = self._animate_notification()
-        pulse_updated = self._animate_pulse()
+        menu_changed = self._animate_menu()
+        notif_changed = self._animate_notification()
+        pulse_changed = self._animate_pulse()
 
-        any_animation = menu_updated or notif_updated or pulse_updated
+        any_change = menu_changed or notif_changed or pulse_changed
 
-        if not any_animation:
-            self.root.after(33, self.animate_loop)
+        # OPTIMIZATION: Adaptive FPS
+        if any_change:
+            self._frames_since_change = 0
+            target_fps = self.TARGET_FPS_ACTIVE
         else:
-            elapsed = (time.time() - start_time) * 1000
-            next_frame = max(1, int(self._frame_time - elapsed))
-            self.root.after(next_frame, self.animate_loop)
+            self._frames_since_change += 1
+            if self._frames_since_change > self._idle_threshold:
+                target_fps = self.TARGET_FPS_IDLE
+            else:
+                target_fps = self.TARGET_FPS_ACTIVE
+
+        self._current_fps_target = target_fps
+        frame_time = 1000 / target_fps
+
+        elapsed = (time.time() - start_time) * 1000
+        next_frame = max(1, int(frame_time - elapsed))
+
+        self.root.after(next_frame, self.animate_loop)
 
     def _animate_menu(self) -> bool:
         """Menu animation with back easing"""
@@ -696,10 +774,10 @@ class OverlayManager:
         return True
 
     def _animate_pulse(self) -> bool:
-        """Pulse animation for mini mode (only when visible)"""
+        """OPTIMIZED: Returns False when pulse not changing"""
         if not self.show_full and self.menu_visible:
-            self.mini_overlay.pulse()
-            return True
+            changed = self.mini_overlay.pulse()
+            return changed  # Only True if visually changed
         return False
 
     def show_notification(
@@ -713,14 +791,13 @@ class OverlayManager:
         icon = self.ICON_MAP.get(color, "●")
         self.notification.set_message(title, message, icon, color)
 
-        # Cancel existing timer safely
-        if self.notif_timer:
+        # OPTIMIZATION: Simpler timer cancel
+        if self.notif_timer is not None:
             try:
                 self.root.after_cancel(self.notif_timer)
-            except (ValueError, tk.TclError):
+            except:
                 pass
-            finally:
-                self.notif_timer = None
+            self.notif_timer = None
 
         if self.notif_visible:
             self.notif_timer = self.root.after(duration, self._hide_notification)

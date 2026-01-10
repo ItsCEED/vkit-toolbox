@@ -14,7 +14,6 @@ from pathlib import Path
 from threading import Thread
 from typing import Optional
 
-
 # Third-party imports
 import yaml
 import win32gui
@@ -53,7 +52,7 @@ console = Console()
 
 
 # Constants
-VERSION = "v3.0"
+VERSION = "v3.2.0"
 APP_TITLE = "VKit - Toolbox"
 GTA_PROCESS_NAME = "GTA5_Enhanced.exe"
 
@@ -85,11 +84,8 @@ BASE_DIR = get_base_dir()
 CONFIG_PATH = BASE_DIR / "config.yaml"
 ASSETS_DIR = Path(__file__).parent  # Assets always from temp extraction
 
-
 # Debug mode toggle
 DEBUG = False
-
-
 
 @dataclass
 class AppConfig:
@@ -155,65 +151,103 @@ class AppConfig:
 
 
 class WindowFocusManager:
-    """Manages window focus detection for GTA V"""
+    """Manages window focus detection - OPTIMIZED"""
 
     def __init__(self, process_name: str = "GTA5_Enhanced.exe"):
         self.process_name = process_name
-        self.gta_window_titles = [
+        self.process_name_lower = process_name.lower()  # Cache lowercase
+        self.gta_window_titles = tuple([  # Tuple faster than list
             "Grand Theft Auto V",
             "GTA5",
             "Rockstar Games"
-        ]
+        ])
         self._last_focus_state = False
         self._focus_callbacks = []
+        self._shutdown_event = threading.Event()
+        self._monitor_thread = None
+
+        # OPTIMIZATION: Cache to reduce Win32 API calls
+        self._last_hwnd = None
+        self._last_pid = None
+        self._last_process_name = None
 
     def get_active_window_process(self) -> Optional[str]:
-        """Get the process name of the currently active window"""
+        """Get process name - OPTIMIZED with caching"""
         try:
             hwnd = win32gui.GetForegroundWindow()
             if not hwnd:
                 return None
 
+            # OPTIMIZATION: Return cached if same window
+            if hwnd == self._last_hwnd and self._last_process_name:
+                return self._last_process_name
+
             _, pid = win32process.GetWindowThreadProcessId(hwnd)
 
+            # OPTIMIZATION: Return cached if same PID
+            if pid == self._last_pid and self._last_process_name:
+                return self._last_process_name
+
             try:
+                # Only create Process object if PID changed
                 process = psutil.Process(pid)
-                return process.name()
+                process_name = process.name()
+
+                # Update cache
+                self._last_hwnd = hwnd
+                self._last_pid = pid
+                self._last_process_name = process_name
+
+                return process_name
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 return None
         except Exception:
             return None
 
     def get_active_window_title(self) -> str:
-        """Get the title of the currently active window"""
+        """Get window title - OPTIMIZED with caching"""
         try:
             hwnd = win32gui.GetForegroundWindow()
-            return win32gui.GetWindowText(hwnd)
+            if hwnd == self._last_hwnd and hasattr(self, '_last_title'):
+                return self._last_title
+
+            title = win32gui.GetWindowText(hwnd)
+            self._last_title = title
+            return title
         except Exception:
             return ""
 
     def is_gta_focused(self) -> bool:
-        """Check if GTA V window is currently focused"""
-        # Method 1: Check by process name
+        """Check if GTA focused - OPTIMIZED"""
+        # Method 1: Check by process name (cached)
         active_process = self.get_active_window_process()
-        if active_process and active_process.lower() == self.process_name.lower():
-            return True
+        if active_process:
+            # OPTIMIZATION: Use cached lowercase comparison
+            if active_process.lower() == self.process_name_lower:
+                return True
 
-        # Method 2: Check by window title (fallback)
+        # Method 2: Check by window title (cached)
         active_title = self.get_active_window_title()
-        return any(gta_title.lower() in active_title.lower() 
-                  for gta_title in self.gta_window_titles)
+        if active_title:
+            active_title_lower = active_title.lower()
+            return any(gta_title.lower() in active_title_lower 
+                      for gta_title in self.gta_window_titles)
+
+        return False
 
     def register_focus_callback(self, callback):
-        """Register a callback to be called when focus changes"""
+        """Register callback"""
         self._focus_callbacks.append(callback)
 
     def check_focus_change(self):
-        """Check if focus state has changed and trigger callbacks"""
+        """Check focus change - OPTIMIZED with thread safety"""
         current_focus = self.is_gta_focused()
 
         if current_focus != self._last_focus_state:
-            for callback in self._focus_callbacks:
+            # OPTIMIZATION: Copy list to avoid race condition
+            callbacks = self._focus_callbacks.copy()
+
+            for callback in callbacks:
                 try:
                     callback(current_focus)
                 except Exception as e:
@@ -222,20 +256,37 @@ class WindowFocusManager:
 
             self._last_focus_state = current_focus
 
-    def start_monitoring(self, interval: float = 0.5):
-        """Start monitoring focus changes in background thread"""
+    def start_monitoring(self, interval: float = 2.0):  # CHANGED: 2s instead of 1s
+        """Start monitoring - OPTIMIZED interval"""
         def monitor():
-            while True:
+            # OPTIMIZATION: Exponential backoff on errors
+            error_count = 0
+            max_errors = 10
+
+            while not self._shutdown_event.is_set() and error_count < max_errors:
                 try:
                     self.check_focus_change()
-                    time.sleep(interval)
+                    error_count = 0  # Reset on success
                 except Exception as e:
+                    error_count += 1
                     if DEBUG:
                         print(f"[DEBUG] Focus monitor error: {e}")
-                    time.sleep(interval)
 
-        monitor_thread = threading.Thread(target=monitor, daemon=True)
-        monitor_thread.start()
+                    # Exponential backoff on repeated errors
+                    if error_count > 3:
+                        self._shutdown_event.wait(min(interval * error_count, 30))
+                        continue
+
+                self._shutdown_event.wait(interval)
+
+        self._monitor_thread = threading.Thread(target=monitor, daemon=True)
+        self._monitor_thread.start()
+
+    def stop_monitoring(self):
+        """Stop monitoring"""
+        self._shutdown_event.set()
+        if self._monitor_thread:
+            self._monitor_thread.join(timeout=3.0)
 
 
 
@@ -703,7 +754,7 @@ class UIManager:
 
 
 class HotkeyHandler:
-    """Handles all hotkey detection and routing"""
+    """Handles all hotkey detection and routing - ROBUST version"""
 
     def __init__(
         self,
@@ -727,6 +778,8 @@ class HotkeyHandler:
         self.solver_manager = solver_manager
         self.exploit_manager = exploit_manager
         self.current_keys: set = set()
+        self._triggered_combos: set = set()  # CHANGED: Just track which actions were triggered
+        self._lock = threading.Lock()
 
         # Initialize window focus manager
         self.focus_manager = WindowFocusManager(GTA_PROCESS_NAME)
@@ -742,9 +795,11 @@ class HotkeyHandler:
         self.hotkeys = {}
         for action, hotkey_str in config.hotkeys.items():
             self.hotkeys[action] = self._parse_hotkey_to_set(hotkey_str)
+            if DEBUG:
+                print(f"[DEBUG] Parsed {action}: {hotkey_str} -> {self.hotkeys[action]}")
 
     def _parse_hotkey_to_set(self, hotkey_str: str) -> set:
-        """Parse hotkey string into a set of keys for combination detection"""
+        """Parse hotkey string - USE from_char() for character keys"""
         parts = [p.strip().lower() for p in hotkey_str.split('+')]
         key_set = set()
 
@@ -765,72 +820,85 @@ class HotkeyHandler:
             if part in key_map:
                 key_set.add(key_map[part])
             else:
-                # Regular character key
+                # Use from_char() to create KeyCode
                 key_set.add(keyboard.KeyCode.from_char(part))
 
         return key_set
 
+    def _normalize_key(self, key):
+        """Normalize keys - MUST match parsing method"""
+        try:
+            # Normalize modifier keys (treat left and right as same)
+            if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+                return keyboard.Key.ctrl
+            if key in (keyboard.Key.alt_l, keyboard.Key.alt_r, keyboard.Key.alt_gr):
+                return keyboard.Key.alt
+            if key in (keyboard.Key.shift_l, keyboard.Key.shift_r):
+                return keyboard.Key.shift
+
+            # For character keys with vk code
+            if hasattr(key, 'vk') and key.vk:
+                # Convert VK codes to characters, then use from_char()
+                if 65 <= key.vk <= 90:  # A-Z
+                    char = chr(key.vk + 32)  # lowercase
+                    return keyboard.KeyCode.from_char(char)
+                elif 48 <= key.vk <= 57:  # 0-9
+                    char = chr(key.vk)
+                    return keyboard.KeyCode.from_char(char)
+
+            # If key has char attribute, use from_char()
+            if hasattr(key, 'char') and key.char:
+                return keyboard.KeyCode.from_char(key.char.lower())
+
+            # For function keys and special keys, return as-is
+            return key
+
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Key normalization error: {e}")
+            return key
+
     def _on_focus_change(self, is_focused: bool):
         """Called when GTA focus state changes"""
-        if not is_focused:
-            # GTA lost focus - stop all active tools
-            stopped_tools = []
+        try:
+            if not is_focused:
+                stopped_tools = []
 
-            if self.autoclicker.active:
-                self.autoclicker.stop()
-                stopped_tools.append("Auto Clicker")
+                if self.autoclicker.active:
+                    self.autoclicker.stop()
+                    stopped_tools.append("Auto Clicker")
 
-            if self.snack_spammer.active:
-                self.snack_spammer.stop()
-                stopped_tools.append("Snack Spammer")
+                if self.snack_spammer.active:
+                    self.snack_spammer.stop()
+                    stopped_tools.append("Snack Spammer")
 
-            if self.anti_afk.active:
-                self.anti_afk.stop()
-                stopped_tools.append("Anti-AFK")
+                if self.anti_afk.active:
+                    self.anti_afk.stop()
+                    stopped_tools.append("Anti-AFK")
 
-            if stopped_tools:
-                tools_str = ", ".join(stopped_tools)
-                console.print(f"[yellow]⏸[/yellow] Alt+Tab detected - Stopped: {tools_str}", 
-                            style="yellow")
-                self.manager.show_notification(
-                    "AUTO-STOPPED", 
-                    f"Tools paused: {tools_str}", 
-                    "#f59e0b"
-                )
+                # Clear keyboard state on focus loss
+                with self._lock:
+                    self.current_keys.clear()
+                    self._triggered_combos.clear()
 
+                if stopped_tools:
+                    tools_str = ", ".join(stopped_tools)
+                    console.print(f"[yellow]⏸[/yellow] Alt+Tab detected - Stopped: {tools_str}",
+                                style="yellow")
+                    self.manager.show_notification(
+                        "AUTO-STOPPED",
+                        f"Tools paused: {tools_str}",
+                        "#f59e0b"
+                    )
+
+                    if DEBUG:
+                        print(f"[DEBUG] Focus lost - Stopped tools: {tools_str}")
+            else:
                 if DEBUG:
-                    print(f"[DEBUG] Focus lost - Stopped tools: {tools_str}")
-        else:
-            # GTA regained focus
+                    print("[DEBUG] GTA regained focus")
+        except Exception as e:
             if DEBUG:
-                print("[DEBUG] GTA regained focus")
-
-    def _normalize_key(self, key):
-        """Normalize keys to handle left/right modifier variants and character keys"""
-        # Normalize modifier keys (treat left and right as same)
-        if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-            return keyboard.Key.ctrl
-        if key in (keyboard.Key.alt_l, keyboard.Key.alt_r, keyboard.Key.alt_gr):
-            return keyboard.Key.alt
-        if key in (keyboard.Key.shift_l, keyboard.Key.shift_r):
-            return keyboard.Key.shift
-
-        # For regular keys, use vk (virtual key code) if available
-        if hasattr(key, 'vk') and key.vk:
-            # Convert vk to lowercase character equivalent
-            # VK codes: A=65, Z=90
-            if 65 <= key.vk <= 90:  # A-Z
-                return keyboard.KeyCode.from_char(chr(key.vk + 32))  # Convert to lowercase
-            elif 48 <= key.vk <= 57:  # 0-9
-                return keyboard.KeyCode.from_char(chr(key.vk))
-            # Return the key with its vk code for consistent comparison
-            return keyboard.KeyCode(vk=key.vk)
-
-        # Fallback: normalize character keys to lowercase
-        if hasattr(key, 'char') and key.char and len(key.char) == 1 and key.char.isprintable():
-            return keyboard.KeyCode.from_char(key.char.lower())
-
-        return key
+                print(f"[DEBUG] Focus callback error: {e}")
 
     def _toggle_overlay_mode(self) -> None:
         self.manager.toggle_mode()
@@ -840,7 +908,7 @@ class HotkeyHandler:
             console.print("◉ Switched to [bold cyan]FULL[/bold cyan] overlay mode", style="blue")
             self.manager.show_notification("OVERLAY MODE", "Full display enabled", "#3b82f6")
         else:
-            console.print("◉ Switched to [bold cyan]MINI[/bold cyan] overlay mode (glowing indicator)", 
+            console.print("◉ Switched to [bold cyan]MINI[/bold cyan] overlay mode (glowing indicator)",
                         style="blue")
             self.manager.show_notification("OVERLAY MODE", "Compact indicator active", "#3b82f6")
         console.print()
@@ -854,102 +922,170 @@ class HotkeyHandler:
         console.print()
 
     def on_press(self, key) -> None:
-        """Handle key press events"""
-        normalized_key = self._normalize_key(key)
+        """Handle key press events - IMPROVED logic"""
+        try:
+            normalized_key = self._normalize_key(key)
 
-        if DEBUG:
-            try:
-                print(f"[DEBUG] Pressed: {key} -> Normalized: {normalized_key}")
-                if hasattr(key, 'vk'):
-                    print(f"[DEBUG]   VK code: {key.vk}")
-                if hasattr(key, 'char'):
-                    print(f"[DEBUG]   Char: {repr(key.char)}")
-                print(f"[DEBUG] Current keys: {self.current_keys}")
-                if self.require_game_focus:
-                    is_focused = self.focus_manager.is_gta_focused()
-                    print(f"[DEBUG] GTA Focused: {is_focused}")
-            except Exception as e:
-                print(f"[DEBUG] Error: {e}")
-
-        self.current_keys.add(normalized_key)
-
-        # Check if GTA is focused (if required)
-        if self.require_game_focus and not self.focus_manager.is_gta_focused():
             if DEBUG:
-                print("[DEBUG] Hotkey ignored - GTA not focused")
-            return
+                print(f"[DEBUG] Key pressed: {key} -> {normalized_key}")
 
-        # Check if any hotkey combination is now complete
-        for action, key_combo in self.hotkeys.items():
-            if key_combo.issubset(self.current_keys):
-                # Prevent repeated triggers while keys are held
-                if not hasattr(self, '_triggered_combos'):
-                    self._triggered_combos = set()
+            with self._lock:
+                # Add key to current set
+                self.current_keys.add(normalized_key)
 
-                combo_id = (action, frozenset(key_combo))
-                if combo_id not in self._triggered_combos:
-                    self._triggered_combos.add(combo_id)
+                if DEBUG:
+                    print(f"[DEBUG]   Current keys: {self.current_keys}")
+                    print(f"[DEBUG]   Triggered combos: {self._triggered_combos}")
 
+                # Check if GTA is focused (if required)
+                if self.require_game_focus and not self.focus_manager.is_gta_focused():
                     if DEBUG:
-                        print(f"[DEBUG] ✓ HOTKEY MATCHED: {action}")
-                        print(f"[DEBUG]   Expected: {key_combo}")
-                        print(f"[DEBUG]   Current: {self.current_keys}")
+                        print("[DEBUG]   GTA not focused - ignoring")
+                    return
 
-                    self._handle_action(action)
-                break
+                # Check if any hotkey combination is now complete
+                for action, key_combo in self.hotkeys.items():
+                    # Skip if already triggered
+                    if action in self._triggered_combos:
+                        continue
+
+                    # Check if combo is pressed
+                    if key_combo.issubset(self.current_keys):
+                        # Mark as triggered
+                        self._triggered_combos.add(action)
+
+                        if DEBUG:
+                            print(f"[DEBUG] ✓✓✓ HOTKEY MATCHED: {action}")
+                            print(f"[DEBUG]   Expected: {key_combo}")
+                            print(f"[DEBUG]   Current: {self.current_keys}")
+
+                        # Execute action in separate thread to avoid blocking
+                        threading.Thread(
+                            target=self._handle_action,
+                            args=(action,),
+                            daemon=True
+                        ).start()
+
+                        break  # Only trigger one action per keypress
+
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] on_press error: {e}")
+                import traceback
+                traceback.print_exc()
 
     def _handle_action(self, action: str) -> None:
         """Route action to appropriate handler"""
-        handlers = {
-            'toggle_overlay': self._toggle_overlay_mode,
-            'toggle_nosave': lambda: self.firewall_manager.toggle_rule(
-                self.manager, self.sound_manager),
-            'debug_toggle': self._toggle_debug,
-            'autoclicker': lambda: self._toggle_tool(
-                self.autoclicker, "AUTO CLICKER ⚡"),
-            'snack_spammer': lambda: self._toggle_tool(
-                self.snack_spammer, "SNACK SPAMMER 🍔", extra=" (Hold TAB)"),
-            'anti_afk': lambda: self._toggle_tool(
-                self.anti_afk, "ANTI-AFK 🎮", extra=" (S+A ↔ S+D)"),
-            'kill_gta': lambda: ProcessManager.kill_process(GTA_PROCESS_NAME, self.manager),
-            'job_warp': self.exploit_manager.job_warp,
-            'casino_fingerprint': self.solver_manager.casino_fingerprint,
-            'casino_keypad': self.solver_manager.casino_keypad,
-            'cayo_fingerprint': self.solver_manager.cayo_fingerprint,
-            'cayo_voltage': self.solver_manager.cayo_voltage,
-        }
+        try:
+            handlers = {
+                'toggle_overlay': self._toggle_overlay_mode,
+                'toggle_nosave': lambda: self.firewall_manager.toggle_rule(
+                    self.manager, self.sound_manager),
+                'debug_toggle': self._toggle_debug,
+                'autoclicker': lambda: self._toggle_tool(
+                    self.autoclicker, "AUTO CLICKER ⚡"),
+                'snack_spammer': lambda: self._toggle_tool(
+                    self.snack_spammer, "SNACK SPAMMER 🍔", extra=" (Hold TAB)"),
+                'anti_afk': lambda: self._toggle_tool(
+                    self.anti_afk, "ANTI-AFK 🎮", extra=" (S+A ↔ S+D)"),
+                'kill_gta': lambda: ProcessManager.kill_process(GTA_PROCESS_NAME, self.manager),
+                'job_warp': self.exploit_manager.job_warp,
+                'casino_fingerprint': self.solver_manager.casino_fingerprint,
+                'casino_keypad': self.solver_manager.casino_keypad,
+                'cayo_fingerprint': self.solver_manager.cayo_fingerprint,
+                'cayo_voltage': self.solver_manager.cayo_voltage,
+            }
 
-        handler = handlers.get(action)
-        if handler:
-            handler()
+            handler = handlers.get(action)
+            if handler:
+                handler()
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Action handler error for {action}: {e}")
+                import traceback
+                traceback.print_exc()
 
     def _toggle_tool(self, tool, name: str, extra: str = "") -> None:
         """Toggle a tool on/off"""
-        console.print(f"[bold green]✓ HOTKEY DETECTED - TOGGLING {name}[/bold green]")
-        tool.toggle()
-        if tool.active:
-            self.manager.show_notification(name, f"ENABLED{extra}", "#10b981")
-        else:
-            self.manager.show_notification(name, "DISABLED", "#ef4444")
+        try:
+            console.print(f"[bold green]✓ HOTKEY DETECTED - TOGGLING {name}[/bold green]")
+            tool.toggle()
+            if tool.active:
+                self.manager.show_notification(name, f"ENABLED{extra}", "#10b981")
+            else:
+                self.manager.show_notification(name, "DISABLED", "#ef4444")
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Tool toggle error: {e}")
 
     def on_release(self, key) -> None:
-        """Handle key release events"""
-        normalized_key = self._normalize_key(key)
-        self.current_keys.discard(normalized_key)
+        """Handle key release events - IMPROVED: Clear combos when ANY key released"""
+        try:
+            normalized_key = self._normalize_key(key)
 
-        # Clear triggered combos when keys are released
-        if hasattr(self, '_triggered_combos'):
-            self._triggered_combos = set()
+            if DEBUG:
+                print(f"[DEBUG] Key released: {key} -> {normalized_key}")
+
+            with self._lock:
+                # Remove key from current set
+                self.current_keys.discard(normalized_key)
+
+                if DEBUG:
+                    print(f"[DEBUG]   Remaining keys: {self.current_keys}")
+
+                # IMPROVED: Clear ALL triggered combos that included this key
+                combos_to_clear = []
+                for action in list(self._triggered_combos):
+                    key_combo = self.hotkeys[action]
+
+                    # If this combo contained the released key
+                    if normalized_key in key_combo:
+                        combos_to_clear.append(action)
+                        if DEBUG:
+                            print(f"[DEBUG]   Clearing combo {action} (contained released key)")
+                    # OR if the combo is no longer fully pressed
+                    elif not key_combo.issubset(self.current_keys):
+                        combos_to_clear.append(action)
+                        if DEBUG:
+                            print(f"[DEBUG]   Clearing combo {action} (no longer fully pressed)")
+
+                # Clear the combos
+                for action in combos_to_clear:
+                    self._triggered_combos.discard(action)
+
+                if DEBUG and combos_to_clear:
+                    print(f"[DEBUG]   Cleared {len(combos_to_clear)} combo(s)")
+                    print(f"[DEBUG]   Remaining triggered: {self._triggered_combos}")
+
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] on_release error: {e}")
+                import traceback
+                traceback.print_exc()
 
     def start_listening(self) -> None:
-        """Start the keyboard listener"""
-        with keyboard.Listener(
-            on_press=self.on_press,
-            on_release=self.on_release,
-            suppress=False
-        ) as listener:
-            listener.join()
+        """Start the keyboard listener with error recovery"""
+        while True:
+            try:
+                if DEBUG:
+                    print("[DEBUG] Starting keyboard listener...")
 
+                with keyboard.Listener(
+                    on_press=self.on_press,
+                    on_release=self.on_release,
+                    suppress=False
+                ) as listener:
+                    listener.join()
+
+            except Exception as e:
+                if DEBUG:
+                    print(f"[DEBUG] Keyboard listener died: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+                time.sleep(1)
+                if DEBUG:
+                    print("[DEBUG] Restarting keyboard listener...")
 
 
 def cleanup(
