@@ -15,7 +15,6 @@ from pynput import keyboard
 from rich.console import Console
 
 # Local application imports
-
 from assets.ui import  OverlayManager
 from tools.autoclicker import AutoClicker, SnackSpammer, AntiAFK
 from solvers import casinofingerprint, casinokeypad, cayofingerprint, cayovoltage

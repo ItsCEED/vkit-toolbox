@@ -1,11 +1,9 @@
-import ctypes
 import math
 import time
 import tkinter as tk
 from functools import lru_cache
 from typing import Optional, Tuple
-import win32gui
-
+from core.managers import GameDetector, WindowFocusManager
 
 # ===== ENHANCED COLOR PALETTE =====
 C_PURE_BLACK = "#000000"
@@ -36,9 +34,6 @@ FONT_HEADER = ("Franklin Gothic Medium", 11, "bold")
 FONT_BODY = ("Franklin Gothic Medium", 9, "bold")
 FONT_SMALL = ("Franklin Gothic Medium", 7, "bold")
 FONT_TINY = ("Franklin Gothic Book", 6)
-
-GTA_WINDOW_TITLES = ["Grand Theft Auto V", "GTA V", "gta5.exe"]
-
 
 class Animator:
     """Enhanced animation easing functions"""
@@ -292,15 +287,6 @@ class GTAMiniIndicator(tk.Frame):
 
         self.center = self.size / 2
 
-        # # Rotating ring with anti-aliasing hint
-        # self.ring_radius = 38
-        # self.ring_arc = self.canvas.create_arc(
-        #     self.center - self.ring_radius, self.center - self.ring_radius,
-        #     self.center + self.ring_radius, self.center + self.ring_radius,
-        #     start=0, extent=270, outline=C_GREEN_BRIGHT,
-        #     width=3, style="arc",   
-        # )
-
         self.glow_layers = []
         base_color = C_GREEN_BRIGHT
 
@@ -339,16 +325,9 @@ class GTAMiniIndicator(tk.Frame):
             fill="#ffffff", outline="", width=0
         )
 
-        # Status letter
-        # self.status_letter = self.canvas.create_text(
-        #     self.center, self.center, text="D",
-        #     font=("Segoe UI", 12, "bold"), fill="#000000"
-        # )
-
         # Animation state
         self.breath_time = 0.0
         self.shimmer_time = 0.0
-        #self.ring_rotation = 0.0
         self.status = "OFF"
         self.base_color = C_GREEN_BRIGHT
         self._frame_counter = 0
@@ -368,11 +347,8 @@ class GTAMiniIndicator(tk.Frame):
 
         self.status = status
         self.base_color = C_RED_BRIGHT if status == "ON" else C_GREEN_BRIGHT
-        letter = "E" if status == "ON" else "D"
 
         self.canvas.itemconfig(self.core, fill=self.base_color)
-        #self.canvas.itemconfig(self.ring_arc, outline=self.base_color)
-        self.canvas.itemconfig(self.status_letter, text=letter)
 
         # Batch color updates
         for layer_data in self.glow_layers:
@@ -389,7 +365,6 @@ class GTAMiniIndicator(tk.Frame):
 
         self.breath_time += 0.025
         self.shimmer_time += 0.040
-        #self.ring_rotation += 2.5
 
         # ⭐ OPTIMIZATION: Calculate once, reuse
         sin_breath = math.sin(self.breath_time)
@@ -454,9 +429,6 @@ class GTAMiniIndicator(tk.Frame):
         shimmer_alpha = 0.7 + shimmer * 0.3
         shimmer_color = ColorUtil.with_alpha("#ffffff", shimmer_alpha)
         self.canvas.itemconfig(self.highlight, fill=shimmer_color)
-
-        # # Rotate ring
-        # self.canvas.itemconfig(self.ring_arc, start=int(self.ring_rotation) % 360)
 
         return visual_change
 
@@ -526,7 +498,7 @@ class GTANotification(tk.Frame):
 
 
 class OverlayManager:
-    """FULLY OPTIMIZED overlay with 40-50% CPU reduction"""
+    """FULLY OPTIMIZED overlay with 40-50% CPU reduction and event-driven focus detection"""
 
     # Animation constants
     MENU_Y_VISIBLE = 40
@@ -541,7 +513,6 @@ class OverlayManager:
     # ⭐ OPTIMIZED: Performance constants
     TARGET_FPS_ACTIVE = 60
     TARGET_FPS_IDLE = 20  # Reduced from 30
-    WINDOW_CHECK_INTERVAL = 0.5
     POSITION_UPDATE_THRESHOLD = 10
 
     # Notification icon mapping
@@ -559,7 +530,7 @@ class OverlayManager:
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-transparentcolor", "black")
-        self.root.attributes("-alpha", 0.80)
+        self.root.attributes("-alpha", 0.85)
 
         self.screen_w = self.root.winfo_screenwidth()
         self.screen_h = self.root.winfo_screenheight()
@@ -592,11 +563,28 @@ class OverlayManager:
         self.notif_x_current = self.NOTIF_X_HIDDEN
         self.notif_x_target = self.NOTIF_X_HIDDEN
 
+        # ⭐ NEW: Event-driven focus manager
+        try:
+            # Try to get GTA process name, fall back to default
+            gta_process = GameDetector().get_gta_process()
+            process_name = gta_process.name() if gta_process else ""
+        except:
+            process_name = ""
+        
+        self.focus_manager = WindowFocusManager()
+        
+        # Register focus callback - uses root.after for thread safety
+        self.focus_manager.register_focus_callback(self._on_focus_change)
+        
+        # Start event-driven monitoring
+        self.focus_manager.start_monitoring()
+        
+        # Force initial refresh
+        self.focus_manager.force_refresh_focus_state()
+
         # Optimization: Dirty flags
         self._animation_dirty = {'menu': True, 'notification': False, 'pulse': False}
         self._gta_hwnd = None
-        self._last_window_check = 0
-        self._window_check_interval = self.WINDOW_CHECK_INTERVAL
         self._last_geometry = None
         self._last_status = None
 
@@ -609,71 +597,30 @@ class OverlayManager:
         self._geometry_cache = {}
         self._geometry_cache_max = 50
 
-        # ⭐ OPTIMIZED: Smaller window buffer
-        self._window_buffer = ctypes.create_unicode_buffer(128)
-
         # Setup cleanup handler
         self.root.protocol("WM_DELETE_WINDOW", self.cleanup)
 
-        self.check_gta_focused()
         self.animate_loop()
 
-    def check_gta_focused(self):
-        """Optimized focus check with buffer reuse"""
-        current_time = time.time()
+    def _on_focus_change(self, is_focused: bool):
+        """Event-driven focus change callback"""
+        # Schedule update in main thread (tkinter is not thread-safe)
+        self.root.after(0, self._handle_focus_change, is_focused)
 
-        if current_time - self._last_window_check < self._window_check_interval:
-            self.root.after(100, self.check_gta_focused)
-            return
-
-        self._last_window_check = current_time
-
+    def _handle_focus_change(self, is_focused: bool):
+        """Handle focus change in main thread"""
         try:
-            hwnd_active = ctypes.windll.user32.GetForegroundWindow()
-
-            if self._gta_hwnd and hwnd_active == self._gta_hwnd:
-                if not self.menu_visible:
-                    self.menu_visible = True
-                    self._animation_dirty['menu'] = True
-                self._update_overlay_position()
-                self.root.after(500, self.check_gta_focused)
-                return
-
-            # Reuse window buffer
-            length = ctypes.windll.user32.GetWindowTextW(
-                hwnd_active, self._window_buffer, 128
-            )
-
-            if length == 0:
-                if self.menu_visible:
-                    self.menu_visible = False
-                    self._animation_dirty['menu'] = True
-                self.root.after(500, self.check_gta_focused)
-                return
-
-            active_title = self._window_buffer.value
-
-            is_gta = any(t.lower() in active_title.lower() for t in GTA_WINDOW_TITLES)
-
-            if is_gta:
-                self._gta_hwnd = hwnd_active
-                if not self.menu_visible:
-                    self.menu_visible = True
-                    self._animation_dirty['menu'] = True
-                self._update_overlay_position()
-            else:
-                if self.menu_visible:
-                    self.menu_visible = False
-                    self._animation_dirty['menu'] = True
-                    self._gta_hwnd = None
-
-        except Exception:
-            if self.menu_visible:
-                self.menu_visible = False
+            if self.menu_visible != is_focused:
+                self.menu_visible = is_focused
                 self._animation_dirty['menu'] = True
-                self._gta_hwnd = None
 
-        self.root.after(500, self.check_gta_focused)
+            # Update window position if focused
+            if is_focused:
+                self._update_overlay_position()
+        except Exception as e:
+            # Log error but don't crash
+            import traceback
+            traceback.print_exc()
 
     def _get_geometry_string(self, w: int, h: int, x: int, y: int) -> str:
         """OPTIMIZED: Cache geometry strings with size limit"""
@@ -690,11 +637,18 @@ class OverlayManager:
 
     def _update_overlay_position(self):
         """OPTIMIZED: Only update when position actually changes"""
-        if not win32gui or not self._gta_hwnd:
+        if not self.menu_visible:  # Only update if overlay is visible
             return
 
+        # Try to get window handle from focus manager cache
+        with self.focus_manager._cache_lock:
+            hwnd = self.focus_manager._cache.get('hwnd')
+            if not hwnd:
+                return
+
         try:
-            rect = win32gui.GetWindowRect(self._gta_hwnd)
+            import win32gui
+            rect = win32gui.GetWindowRect(hwnd)
             new_geometry = (rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1])
 
             if self._last_geometry == new_geometry:
@@ -869,10 +823,8 @@ class OverlayManager:
     @staticmethod
     def get_window_bbox() -> Optional[Tuple[int, int, int, int]]:
         """Get GTA window bounds"""
-        if not win32gui:
-            return None
-
         try:
+            import win32gui
             hwnd = win32gui.FindWindow(None, "Grand Theft Auto V")
             if hwnd:
                 return win32gui.GetWindowRect(hwnd)
@@ -882,6 +834,10 @@ class OverlayManager:
 
     def cleanup(self):
         """Clean up resources before exit"""
+        # Stop focus monitoring
+        if hasattr(self, 'focus_manager'):
+            self.focus_manager.stop_monitoring()
+
         if self.notif_timer:
             try:
                 self.root.after_cancel(self.notif_timer)
