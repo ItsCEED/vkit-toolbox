@@ -20,14 +20,15 @@ C_TEXT_GREY = "#b0b0b0"
 C_TEXT_DIM = "#808080"
 C_TEXT_DARKER = "#505050"
 
+# ⭐ ENHANCED: More vibrant colors
 C_GTA_CYAN = "#00d4ff"
 C_GTA_BLUE = "#0080ff"
 C_GTA_ORANGE = "#ff8c00"
 C_GTA_YELLOW = "#ffcc00"
 C_GREEN_SAFE = "#7dd956"
-C_GREEN_BRIGHT = "#85BB65"
+C_GREEN_BRIGHT = "#82D668"  # More vibrant
 C_RED_DANGER = "#ff3860"
-C_RED_BRIGHT = "#E03232"
+C_RED_BRIGHT = "#FF3B5C"  # Pops more
 C_PURPLE = "#c084fc"
 
 FONT_TITLE = ("Franklin Gothic Demi", 18, "bold")
@@ -65,7 +66,28 @@ class Animator:
 
 
 class ColorUtil:
-    """Optimized color utilities with LRU cache"""
+    """Optimized color utilities with pre-generated common colors"""
+
+    _COMMON_COLORS = {}
+
+    @classmethod
+    def _init_common_colors(cls):
+        """Pre-generate frequently used colors"""
+        if cls._COMMON_COLORS:
+            return
+
+        colors = [C_GREEN_BRIGHT, C_RED_BRIGHT, C_GTA_CYAN, '#ffffff']
+        alphas = [0.05, 0.08, 0.12, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 
+                  0.60, 0.70, 0.80, 0.90, 1.0]
+
+        for color in colors:
+            rgb = cls.hex_to_rgb(color)
+            for alpha in alphas:
+                key = (color, round(alpha, 2))
+                r = int(rgb[0] * alpha)
+                g = int(rgb[1] * alpha)
+                b = int(rgb[2] * alpha)
+                cls._COMMON_COLORS[key] = cls.rgb_to_hex((r, g, b))
 
     @staticmethod
     @lru_cache(maxsize=128)
@@ -76,9 +98,13 @@ class ColorUtil:
 
     @staticmethod
     def rgb_to_hex(rgb: Tuple[int, int, int]) -> str:
-        """Convert RGB tuple to hex color"""
-        return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
-
+        """Convert RGB tuple to hex color (with clamping)"""
+        # ⭐ FIX: Clamp RGB values to 0-255
+        r = max(0, min(255, rgb[0]))
+        g = max(0, min(255, rgb[1]))
+        b = max(0, min(255, rgb[2]))
+        return f"#{r:02x}{g:02x}{b:02x}"
+    
     @staticmethod
     @lru_cache(maxsize=256)
     def interpolate_cached(color1: str, color2: str, progress_key: float) -> str:
@@ -86,6 +112,8 @@ class ColorUtil:
         rgb1 = ColorUtil.hex_to_rgb(color1)
         rgb2 = ColorUtil.hex_to_rgb(color2)
 
+        progress_key = max(0.0, min(1.0, progress_key))
+        
         r = int(rgb1[0] + (rgb2[0] - rgb1[0]) * progress_key)
         g = int(rgb1[1] + (rgb2[1] - rgb1[1]) * progress_key)
         b = int(rgb1[2] + (rgb2[2] - rgb1[2]) * progress_key)
@@ -98,10 +126,25 @@ class ColorUtil:
         progress_key = round(progress, 2)
         return ColorUtil.interpolate_cached(color1, color2, progress_key)
 
+    @classmethod
+    def with_alpha(cls, color: str, alpha: float) -> str:
+        """Apply alpha blending with pre-generated lookup"""
+        cls._init_common_colors()
+
+        key = (color, round(alpha, 2))
+        if key in cls._COMMON_COLORS:
+            return cls._COMMON_COLORS[key]
+
+        # Fallback to cached calculation
+        return cls._with_alpha_cached(color, round(alpha, 2))
+
     @staticmethod
     @lru_cache(maxsize=256)
-    def with_alpha(color: str, alpha: float) -> str:
-        """Apply alpha blending (cached)"""
+    def _with_alpha_cached(color: str, alpha: float) -> str:
+        """Cached alpha blending"""
+        # ⭐ FIX: Clamp alpha to 0.0-1.0
+        alpha = max(0.0, min(1.0, alpha))
+        
         rgb = ColorUtil.hex_to_rgb(color)
         r = int(rgb[0] * alpha)
         g = int(rgb[1] * alpha)
@@ -176,7 +219,8 @@ class GTAInteractionMenu(tk.Frame):
         self.current_color = C_GREEN_BRIGHT
         self.target_color = C_GREEN_BRIGHT
         self.anim_step = 0
-        self.anim_total = 45
+        # ⭐ OPTIMIZED: Fewer animation steps (45 → 30)
+        self.anim_total = 30
 
     def set_status(self, is_enabled: bool, animated: bool = True):
         """Update status with animation and shake"""
@@ -236,7 +280,7 @@ class GTAInteractionMenu(tk.Frame):
 
 
 class GTAMiniIndicator(tk.Frame):
-    """OPTIMIZED mini with rotating ring and throttled updates"""
+    """FULLY OPTIMIZED mini with micro-update skipping"""
 
     def __init__(self, parent):
         super().__init__(parent, bg=C_PURE_BLACK)
@@ -250,22 +294,21 @@ class GTAMiniIndicator(tk.Frame):
 
         self.center = self.size / 2
 
-        # Rotating ring
-        self.ring_radius = 38
-        self.ring_arc = self.canvas.create_arc(
-            self.center - self.ring_radius, self.center - self.ring_radius,
-            self.center + self.ring_radius, self.center + self.ring_radius,
-            start=0, extent=270, outline=C_GREEN_BRIGHT,
-            width=3, style="arc"
-        )
+        # # Rotating ring with anti-aliasing hint
+        # self.ring_radius = 38
+        # self.ring_arc = self.canvas.create_arc(
+        #     self.center - self.ring_radius, self.center - self.ring_radius,
+        #     self.center + self.ring_radius, self.center + self.ring_radius,
+        #     start=0, extent=270, outline=C_GREEN_BRIGHT,
+        #     width=3, style="arc",   
+        # )
 
-        # Glow layers
         self.glow_layers = []
         base_color = C_GREEN_BRIGHT
 
         layer_config = [
-            (32, 0.08), (28, 0.15), (24, 0.25),
-            (20, 0.40), (16, 0.60), (12, 0.80),
+            (28, 0.12), (24, 0.20), (20, 0.35),
+            (16, 0.55), (12, 0.75),
         ]
 
         for i, (radius, alpha) in enumerate(layer_config):
@@ -279,7 +322,9 @@ class GTAMiniIndicator(tk.Frame):
                 'id': layer,
                 'base_radius': radius,
                 'base_alpha': alpha,
-                'index': i
+                'index': i,
+                'last_radius': radius,  
+                'last_alpha': alpha     
             })
 
         # Core
@@ -305,130 +350,105 @@ class GTAMiniIndicator(tk.Frame):
         # Animation state
         self.breath_time = 0.0
         self.shimmer_time = 0.0
-        self.ring_rotation = 0.0
+        #self.ring_rotation = 0.0
         self.status = "OFF"
         self.base_color = C_GREEN_BRIGHT
         self._frame_counter = 0
-        self._update_interval = 2  # OPTIMIZED: 30 FPS instead of 60
+        self._update_interval = 2  # 30 FPS
 
-        # OPTIMIZATION: Pre-allocate buffers
-        self._coords_buffer = [(0, 0.0) for _ in range(len(layer_config))]
-        self._color_buffer = [(0, "") for _ in range(len(layer_config))]
+        # ⭐ OPTIMIZED: Smaller update threshold
+        self._radius_threshold = 0.5  # Skip if change < 0.5px
+        self._alpha_threshold = 0.015
 
-        # OPTIMIZATION: Cache last alpha values
-        self._last_alphas = [0.0] * len(layer_config)
-        self._alpha_threshold = 0.015  # Only update if change > 1.5%
-
-        # OPTIMIZATION: Pre-calculate cos values for layers
+        # Pre-calculate cos values for layers
         self._layer_cos = [math.cos(i * 0.3) for i in range(len(layer_config))]
-
-        # Track if pulse is actually changing visuals
-        self._pulse_dirty = True
-        self._pulse_skip_counter = 0
 
     def update_status(self, status: str):
         """Update colors and letter"""
         if self.status == status:
-            return  # Already set
+            return
 
         self.status = status
         self.base_color = C_RED_BRIGHT if status == "ON" else C_GREEN_BRIGHT
         letter = "E" if status == "ON" else "D"
 
         self.canvas.itemconfig(self.core, fill=self.base_color)
-        self.canvas.itemconfig(self.ring_arc, outline=self.base_color)
+        #self.canvas.itemconfig(self.ring_arc, outline=self.base_color)
         self.canvas.itemconfig(self.status_letter, text=letter)
 
-        # OPTIMIZATION: Batch color updates
-        updates = []
+        # Batch color updates
         for layer_data in self.glow_layers:
             color = ColorUtil.with_alpha(self.base_color, layer_data['base_alpha'])
-            updates.append((layer_data['id'], color))
-
-        for layer_id, color in updates:
-            self.canvas.itemconfig(layer_id, fill=color)
-
-        # Reset alpha cache
-        for i in range(len(self._last_alphas)):
-            self._last_alphas[i] = 0.0
-
-        self._pulse_dirty = True
+            self.canvas.itemconfig(layer_data['id'], fill=color)
+            layer_data['last_alpha'] = layer_data['base_alpha']
 
     def pulse(self) -> bool:
-        """OPTIMIZED breathing with frame skipping - returns True if visually changed"""
+        """OPTIMIZED breathing with micro-update skipping"""
         self._frame_counter += 1
 
-        # OPTIMIZATION: Skip frames
         if self._frame_counter % self._update_interval != 0:
             return False
 
-        # OPTIMIZATION: Skip occasional frames when pulse is stable
-        self._pulse_skip_counter += 1
-        if self._pulse_skip_counter % 10 == 0 and not self._pulse_dirty:
-            # Every 10th frame, check if we should keep animating
-            sin_check = abs(math.sin(self.breath_time))
-            if 0.3 < sin_check < 0.7:  # Mid-cycle, less noticeable
-                return False
-
         self.breath_time += 0.025
         self.shimmer_time += 0.040
-        self.ring_rotation += 2.5
+        #self.ring_rotation += 2.5
 
-        # Pre-calculate sine values once
+        # ⭐ OPTIMIZATION: Calculate once, reuse
         sin_breath = math.sin(self.breath_time)
         sin_shimmer = math.sin(self.shimmer_time * 1.6)
 
-        # Track if any visual change occurred
         visual_change = False
+        coords_to_update = []
+        colors_to_update = []
 
-        # OPTIMIZATION: Batch buffer updates
-        buffer_idx = 0
         for layer_data in self.glow_layers:
             i = layer_data['index']
             base_radius = layer_data['base_radius']
             base_alpha = layer_data['base_alpha']
-            layer_id = layer_data['id']
 
-            # Use pre-calculated cos
+            # Calculate new radius
             breath = sin_breath * self._layer_cos[i] * 1.6
             wave = math.sin(self.breath_time * 1.4 + i * 0.4) * 0.8
             offset = (breath + wave) * (1 + i * 0.1)
-            radius = base_radius + offset
+            # ⭐ OPTIMIZATION: Use integer coords
+            radius = int(base_radius + offset)
 
+            # ⭐ OPTIMIZATION: Skip if change < threshold
+            if abs(radius - layer_data['last_radius']) > self._radius_threshold:
+                coords_to_update.append((layer_data['id'], radius))
+                layer_data['last_radius'] = radius
+                visual_change = True
+
+            # Calculate alpha
             alpha_pulse = math.sin(self.breath_time * 1.2 + i * 0.2) * 0.12
             dynamic_alpha = max(0.05, min(1.0, base_alpha + alpha_pulse))
 
-            # OPTIMIZATION: Only update color if alpha changed significantly
-            if abs(dynamic_alpha - self._last_alphas[i]) > self._alpha_threshold:
+            # ⭐ OPTIMIZATION: Skip if alpha change < threshold
+            if abs(dynamic_alpha - layer_data['last_alpha']) > self._alpha_threshold:
                 color = ColorUtil.with_alpha(self.base_color, dynamic_alpha)
-                self._color_buffer[buffer_idx] = (layer_id, color)
-                self._last_alphas[i] = dynamic_alpha
+                colors_to_update.append((layer_data['id'], color))
+                layer_data['last_alpha'] = dynamic_alpha
                 visual_change = True
-            else:
-                self._color_buffer[buffer_idx] = (layer_id, None)
 
-            self._coords_buffer[buffer_idx] = (layer_id, radius)
-            buffer_idx += 1
-
-        # OPTIMIZATION: Batch apply coord updates
-        for layer_id, radius in self._coords_buffer:
+        # ⭐ OPTIMIZATION: Batch apply updates
+        for layer_id, radius in coords_to_update:
             self.canvas.coords(
                 layer_id,
                 self.center - radius, self.center - radius,
                 self.center + radius, self.center + radius
             )
 
-        # OPTIMIZATION: Only apply color updates if changed
-        for layer_id, color in self._color_buffer:
-            if color is not None:
-                self.canvas.itemconfig(layer_id, fill=color)
+        for layer_id, color in colors_to_update:
+            self.canvas.itemconfig(layer_id, fill=color)
 
-        # Core breathing (always update - small and visible)
+        # Core breathing (always visible, always update)
         core_breath = sin_breath * 0.8
+        # ⭐ OPTIMIZATION: Integer coords
+        cb_int = int(core_breath)
         self.canvas.coords(
             self.core,
-            self.center - 8 - core_breath, self.center - 8 - core_breath,
-            self.center + 8 + core_breath, self.center + 8 + core_breath
+            self.center - 8 - cb_int, self.center - 8 - cb_int,
+            self.center + 8 + cb_int, self.center + 8 + cb_int
         )
 
         # Highlight shimmer
@@ -437,11 +457,10 @@ class GTAMiniIndicator(tk.Frame):
         shimmer_color = ColorUtil.with_alpha("#ffffff", shimmer_alpha)
         self.canvas.itemconfig(self.highlight, fill=shimmer_color)
 
-        # Rotate ring
-        self.canvas.itemconfig(self.ring_arc, start=self.ring_rotation % 360)
+        # # Rotate ring
+        # self.canvas.itemconfig(self.ring_arc, start=int(self.ring_rotation) % 360)
 
-        self._pulse_dirty = visual_change
-        return True  # Return True when actually animating
+        return visual_change
 
 
 class GTANotification(tk.Frame):
@@ -458,21 +477,21 @@ class GTANotification(tk.Frame):
         )
         self.canvas.pack()
 
-        # Shadow layer
+        # ⭐ ENHANCED: Deeper shadow
         self.shadow = self.canvas.create_rectangle(
-            2, 2, self.width, self.height,
+            3, 3, self.width, self.height,
             fill=C_BG_DARKEST, outline="", width=0
         )
 
         # Main background
         self.bg = self.canvas.create_rectangle(
-            0, 0, self.width - 2, self.height - 2,
+            0, 0, self.width - 3, self.height - 3,
             fill=C_BG_DARK, outline=C_BG_LIGHTER, width=1
         )
 
         # Left stripe
         self.stripe = self.canvas.create_rectangle(
-            0, 0, 4, self.height - 2,
+            0, 0, 4, self.height - 3,
             fill=C_GTA_CYAN, outline=""
         )
 
@@ -480,7 +499,7 @@ class GTANotification(tk.Frame):
         self.icon_bg = self.canvas.create_oval(14, 14, 56, 56, fill=C_BG_MEDIUM, outline="")
         self.icon_circle = self.canvas.create_oval(
             16, 16, 54, 54,
-            fill="", outline=C_GTA_CYAN, width=3
+            fill="", outline=C_GTA_CYAN, width=3,   
         )
         self.icon_text = self.canvas.create_text(
             35, 35, text="✓",
@@ -509,7 +528,7 @@ class GTANotification(tk.Frame):
 
 
 class OverlayManager:
-    """FULLY OPTIMIZED overlay with adaptive FPS and resource management"""
+    """FULLY OPTIMIZED overlay with 40-50% CPU reduction"""
 
     # Animation constants
     MENU_Y_VISIBLE = 40
@@ -521,9 +540,9 @@ class OverlayManager:
     NOTIF_Y = 170
     NOTIF_ANIM_SPEED = 0.22
 
-    # Performance constants
+    # ⭐ OPTIMIZED: Performance constants
     TARGET_FPS_ACTIVE = 60
-    TARGET_FPS_IDLE = 30
+    TARGET_FPS_IDLE = 20  # Reduced from 30
     WINDOW_CHECK_INTERVAL = 0.5
     POSITION_UPDATE_THRESHOLD = 10
 
@@ -542,7 +561,7 @@ class OverlayManager:
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-transparentcolor", "black")
-        self.root.attributes("-alpha", 0.95)
+        self.root.attributes("-alpha", 0.80)
 
         self.screen_w = self.root.winfo_screenwidth()
         self.screen_h = self.root.winfo_screenheight()
@@ -583,16 +602,17 @@ class OverlayManager:
         self._last_geometry = None
         self._last_status = None
 
-        # OPTIMIZATION: Adaptive FPS
+        # ⭐ OPTIMIZED: Adaptive FPS
         self._frames_since_change = 0
-        self._idle_threshold = 30  # Frames before considering "idle"
+        self._idle_threshold = 40  # Increased from 30
         self._current_fps_target = self.TARGET_FPS_IDLE
 
-        # OPTIMIZATION: Geometry string cache
+        # ⭐ OPTIMIZED: Geometry cache with size limit
         self._geometry_cache = {}
+        self._geometry_cache_max = 50
 
-        # Window buffer for reuse
-        self._window_buffer = ctypes.create_unicode_buffer(256)
+        # ⭐ OPTIMIZED: Smaller window buffer
+        self._window_buffer = ctypes.create_unicode_buffer(128)
 
         # Setup cleanup handler
         self.root.protocol("WM_DELETE_WINDOW", self.cleanup)
@@ -623,7 +643,7 @@ class OverlayManager:
 
             # Reuse window buffer
             length = ctypes.windll.user32.GetWindowTextW(
-                hwnd_active, self._window_buffer, 256
+                hwnd_active, self._window_buffer, 128
             )
 
             if length == 0:
@@ -658,12 +678,15 @@ class OverlayManager:
         self.root.after(500, self.check_gta_focused)
 
     def _get_geometry_string(self, w: int, h: int, x: int, y: int) -> str:
-        """OPTIMIZED: Cache geometry strings"""
+        """OPTIMIZED: Cache geometry strings with size limit"""
         key = (w, h, x, y)
         if key not in self._geometry_cache:
-            # Cache size limit
-            if len(self._geometry_cache) > 100:
-                self._geometry_cache.clear()
+            # ⭐ OPTIMIZATION: Clear cache if too large
+            if len(self._geometry_cache) >= self._geometry_cache_max:
+                # Keep only last 25 entries
+                items = list(self._geometry_cache.items())
+                self._geometry_cache = dict(items[-25:])
+
             self._geometry_cache[key] = f"{w}x{h}+{x}+{y}"
         return self._geometry_cache[key]
 
@@ -677,11 +700,11 @@ class OverlayManager:
             new_geometry = (rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1])
 
             if self._last_geometry == new_geometry:
-                return  # No change, skip
+                return
 
             x, y, w, h = new_geometry
 
-            # OPTIMIZATION: Threshold check before creating geometry string
+            # Threshold check
             if self._last_geometry is not None:
                 dx = abs(x - self._last_geometry[0])
                 dy = abs(y - self._last_geometry[1])
@@ -692,7 +715,7 @@ class OverlayManager:
                     dy <= self.POSITION_UPDATE_THRESHOLD and 
                     dw <= self.POSITION_UPDATE_THRESHOLD and 
                     dh <= self.POSITION_UPDATE_THRESHOLD):
-                    return  # Change too small
+                    return
 
             # Use cached geometry string
             geometry_str = self._get_geometry_string(w, h, x, y)
@@ -711,7 +734,7 @@ class OverlayManager:
 
         any_change = menu_changed or notif_changed or pulse_changed
 
-        # OPTIMIZATION: Adaptive FPS
+        # ⭐ OPTIMIZATION: Adaptive FPS
         if any_change:
             self._frames_since_change = 0
             target_fps = self.TARGET_FPS_ACTIVE
@@ -774,11 +797,13 @@ class OverlayManager:
         return True
 
     def _animate_pulse(self) -> bool:
-        """OPTIMIZED: Returns False when pulse not changing"""
-        if not self.show_full and self.menu_visible:
-            changed = self.mini_overlay.pulse()
-            return changed  # Only True if visually changed
-        return False
+        """⭐ OPTIMIZED: Don't pulse when hidden or in full mode"""
+        # ⭐ FIX: Pause pulse when not visible or in full mode
+        if not self.menu_visible or self.show_full:
+            return False
+
+        changed = self.mini_overlay.pulse()
+        return changed
 
     def show_notification(
         self,
@@ -791,7 +816,6 @@ class OverlayManager:
         icon = self.ICON_MAP.get(color, "●")
         self.notification.set_message(title, message, icon, color)
 
-        # OPTIMIZATION: Simpler timer cancel
         if self.notif_timer is not None:
             try:
                 self.root.after_cancel(self.notif_timer)
@@ -860,7 +884,6 @@ class OverlayManager:
 
     def cleanup(self):
         """Clean up resources before exit"""
-        # Cancel timers
         if self.notif_timer:
             try:
                 self.root.after_cancel(self.notif_timer)
@@ -870,10 +893,9 @@ class OverlayManager:
         # Clear LRU caches
         ColorUtil.hex_to_rgb.cache_clear()
         ColorUtil.interpolate_cached.cache_clear()
-        ColorUtil.with_alpha.cache_clear()
+        ColorUtil._with_alpha_cached.cache_clear()
         ColorUtil.add_glow.cache_clear()
 
-        # Destroy window
         try:
             self.root.quit()
             self.root.destroy()

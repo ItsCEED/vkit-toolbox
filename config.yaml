@@ -10,8 +10,8 @@ hotkeys:
   autoclicker: ctrl+k
   snack_spammer: ctrl+c
   anti_afk: ctrl+shift+a
-  job_warp: ctrl+j
-  debug_toggle: ctrl+shift+d
+  job_warp: ctrl+shift+j
+  debug_toggle: ctrl+alt+shift+d
   kill_gta: ctrl+shift+q
   casino_fingerprint: f5
   casino_keypad: f6
