@@ -27,7 +27,7 @@ class AutoClicker:
         self.active = False
         self.thread: threading.Thread | None = None
         self.sound_manager = sound_manager
-        self.clicks_per_second = 50
+        self.clicks_per_second = 70
         self.use_directinput = PYDIRECTINPUT_AVAILABLE
         self.stop_event = threading.Event()  # 🔥 NEW
 

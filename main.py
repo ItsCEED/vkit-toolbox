@@ -15,7 +15,8 @@ from pynput import keyboard
 from rich.console import Console
 
 # Local application imports
-from assets.ui import OverlayManager
+
+from assets.ui import  OverlayManager
 from tools.autoclicker import AutoClicker, SnackSpammer, AntiAFK
 from solvers import casinofingerprint, casinokeypad, cayofingerprint, cayovoltage
 from exploits import jobwarp
@@ -25,15 +26,16 @@ from core.managers import (
     SoundManager,
     FirewallManager,
     ProcessManager,
+    GameDetector
 )
 from core.ui import UIManager, UpdateChecker
 
 console = Console()
 
 # Constants
-VERSION = "v3.3.0"
+VERSION = "v3.3.3"
 APP_TITLE = "VKit - Toolbox"
-GTA_PROCESS_NAME = "GTA5_Enhanced.exe"
+
 THREAD_POOL = ThreadPoolExecutor(max_workers=15, thread_name_prefix="vkit_worker")
 DEBUG = False
 
@@ -249,7 +251,7 @@ class HotkeyHandler:
         self._should_run = True
 
         # Focus manager
-        self.focus_manager = WindowFocusManager(GTA_PROCESS_NAME)
+        self.focus_manager = WindowFocusManager()
         self.require_game_focus = config.require_game_focus
         self.auto_stop_on_unfocus = config.auto_stop_on_unfocus
 
@@ -457,7 +459,7 @@ class HotkeyHandler:
                 self.anti_afk, "ANTI-AFK 🎮", " (S+A ↔ S+D)"
             ),
             "kill_gta": lambda: ProcessManager.kill_process(
-                GTA_PROCESS_NAME, self.manager
+                GameDetector().get_gta_process().name(), self.manager
             ),
             "job_warp": self.exploit_manager.job_warp,
             "casino_fingerprint": self.solver_manager.casino_fingerprint,

@@ -22,7 +22,32 @@ from rich.console import Console
 
 console = Console()
 
+class GameDetector:
+    def __init__(self, process_prefix: str = "GTA5", poll_interval: float = 0.5, timeout: Optional[float] = None):
+        self.process_prefix = process_prefix
+        self.poll_interval = poll_interval
+        self.timeout = timeout
 
+    def get_gta_process(self) -> Optional[psutil.Process]:
+        start_time = time.time()
+        console.print("Waiting for GTA.", style="yellow")
+        while True:
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    if proc.info['name'].startswith(self.process_prefix):
+                        console.print(f"{proc.info['name']} detected.", style="yellow")
+                        return proc
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    console.print("Waiting for GTA.", style="yellow")
+                    pass
+                
+            
+            # Check timeout
+            if self.timeout and (time.time() - start_time > self.timeout):
+                raise TimeoutError(f"GTA process '{self.process_prefix}' not detected within {self.timeout}s")
+            
+            time.sleep(self.poll_interval)
+    
 # ============================================================================
 # WINDOW FOCUS MANAGEMENT
 # ============================================================================
@@ -33,7 +58,7 @@ class WindowFocusManager:
     EVENT_SYSTEM_FOREGROUND = 0x0003
     WINEVENT_OUTOFCONTEXT = 0x0000
 
-    def __init__(self, process_name: str = "GTA5_Enhanced.exe"):
+    def __init__(self, process_name: str = GameDetector().get_gta_process().name()):
         self.process_name = process_name.lower()
         self.gta_titles = frozenset(['grand theft auto v', 'gta5', 'rockstar games'])
 

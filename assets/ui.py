@@ -142,7 +142,6 @@ class ColorUtil:
     @lru_cache(maxsize=256)
     def _with_alpha_cached(color: str, alpha: float) -> str:
         """Cached alpha blending"""
-        # ⭐ FIX: Clamp alpha to 0.0-1.0
         alpha = max(0.0, min(1.0, alpha))
         
         rgb = ColorUtil.hex_to_rgb(color)
@@ -219,7 +218,6 @@ class GTAInteractionMenu(tk.Frame):
         self.current_color = C_GREEN_BRIGHT
         self.target_color = C_GREEN_BRIGHT
         self.anim_step = 0
-        # ⭐ OPTIMIZED: Fewer animation steps (45 → 30)
         self.anim_total = 30
 
     def set_status(self, is_enabled: bool, animated: bool = True):
@@ -342,10 +340,10 @@ class GTAMiniIndicator(tk.Frame):
         )
 
         # Status letter
-        self.status_letter = self.canvas.create_text(
-            self.center, self.center, text="D",
-            font=("Segoe UI", 12, "bold"), fill="#000000"
-        )
+        # self.status_letter = self.canvas.create_text(
+        #     self.center, self.center, text="D",
+        #     font=("Segoe UI", 12, "bold"), fill="#000000"
+        # )
 
         # Animation state
         self.breath_time = 0.0
