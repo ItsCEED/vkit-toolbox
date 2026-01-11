@@ -9,7 +9,7 @@ hotkeys:
   toggle_nosave: ctrl+f9
   autoclicker: ctrl+k
   snack_spammer: ctrl+c
-  anti_afk: ctrl+a
+  anti_afk: ctrl+shift+a
   job_warp: ctrl+j
   debug_toggle: ctrl+shift+d
   kill_gta: ctrl+shift+q

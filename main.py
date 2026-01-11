@@ -11,8 +11,8 @@ import urllib.request
 import winsound
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Thread
-from typing import Optional
+from typing import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 # Third-party imports
 import yaml
@@ -27,69 +27,53 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-
 # Local application imports
 from assets.ui import OverlayManager
 from tools.autoclicker import AutoClicker, SnackSpammer, AntiAFK
 
-
-# Optional dependencies
-try:
-    from solvers import casinofingerprint, casinokeypad, cayofingerprint, cayovoltage
-    SOLVERS_AVAILABLE = True
-except ImportError:
-    SOLVERS_AVAILABLE = False
-
-
-try:
-    from exploits import jobwarp
-    JOBWARP_AVAILABLE = True
-except ImportError:
-    JOBWARP_AVAILABLE = False
+from solvers import casinofingerprint, casinokeypad, cayofingerprint, cayovoltage
+from exploits import jobwarp
 
 
 console = Console()
 
-
 # Constants
-VERSION = "v3.2.0"
+VERSION = "v3.3.0"
 APP_TITLE = "VKit - Toolbox"
 GTA_PROCESS_NAME = "GTA5_Enhanced.exe"
 
-# --- SMART PATHING ---
-# If compiled, sys.executable is the .exe in your folder. 
-# If script, __file__ is your main.py.
+# Thread pool for async operations (bounded to prevent memory leaks)
+THREAD_POOL = ThreadPoolExecutor(max_workers=10, thread_name_prefix="vkit_worker")
+
+# Smart pathing
 def get_base_dir() -> Path:
     """Get the directory containing the actual .exe or script"""
-    # Method 1: Check sys.argv[0] (most reliable for onefile)
-    # When you double-click VKit.exe, argv[0] contains the full path
     if sys.argv[0].endswith('.exe'):
         return Path(sys.argv[0]).parent.resolve()
-    
-    # Method 2: Check sys.executable
+
     exe_path = Path(sys.executable).resolve()
     exe_name = exe_path.name.lower()
-    print(exe_path)
-    print(exe_name)
-    # If it's NOT python.exe AND not in a temp folder, use it
+
     if 'python' not in exe_name and 'temp' not in str(exe_path).lower():
         return exe_path.parent
-    
-    # Method 3: Fall back to __file__ (script mode)
+
     return Path(__file__).parent.resolve()
 
 
-# Apply the fix
 BASE_DIR = get_base_dir()
 CONFIG_PATH = BASE_DIR / "config.yaml"
-ASSETS_DIR = Path(__file__).parent  # Assets always from temp extraction
+ASSETS_DIR = Path(__file__).parent
 
-# Debug mode toggle
+# Debug mode
 DEBUG = False
+
 
 @dataclass
 class AppConfig:
     """Application configuration"""
+    __slots__ = ('rule_name', 'remote_ip', 'test_port', 'hotkeys', 
+                 'require_game_focus', 'auto_stop_on_unfocus')
+
     rule_name: str
     remote_ip: str
     test_port: int
@@ -149,198 +133,225 @@ class AppConfig:
         console.print(f"[green]✓[/green] Created default config at: {path}")
 
 
-
 class WindowFocusManager:
-    """Manages window focus detection - OPTIMIZED"""
+    """EVENT-DRIVEN window focus detection - WITH MANUAL REFRESH"""
+
+    EVENT_SYSTEM_FOREGROUND = 0x0003
+    WINEVENT_OUTOFCONTEXT = 0x0000
 
     def __init__(self, process_name: str = "GTA5_Enhanced.exe"):
-        self.process_name = process_name
-        self.process_name_lower = process_name.lower()  # Cache lowercase
-        self.gta_window_titles = tuple([  # Tuple faster than list
-            "Grand Theft Auto V",
-            "GTA5",
-            "Rockstar Games"
-        ])
-        self._last_focus_state = False
-        self._focus_callbacks = []
-        self._shutdown_event = threading.Event()
-        self._monitor_thread = None
+        self.process_name = process_name.lower()
+        self.gta_titles = frozenset(['grand theft auto v', 'gta5', 'rockstar games'])
 
-        # OPTIMIZATION: Cache to reduce Win32 API calls
-        self._last_hwnd = None
-        self._last_pid = None
-        self._last_process_name = None
+        self._is_focused = False
+        self._callbacks = []
+        self._hook_id = None
+        self._shutdown = threading.Event()
 
-    def get_active_window_process(self) -> Optional[str]:
-        """Get process name - OPTIMIZED with caching"""
-        try:
-            hwnd = win32gui.GetForegroundWindow()
-            if not hwnd:
-                return None
+        # Unified cache
+        self._cache = {'hwnd': None, 'pid': None, 'process': None, 'title': None}
+        self._cache_lock = threading.Lock()
 
-            # OPTIMIZATION: Return cached if same window
-            if hwnd == self._last_hwnd and self._last_process_name:
-                return self._last_process_name
+        # Windows hook setup
+        self._hook_func = ctypes.WINFUNCTYPE(
+            None,
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_void_p,
+            ctypes.c_long,
+            ctypes.c_long,
+            ctypes.c_uint,
+            ctypes.c_uint
+        )(self._on_window_focus_change)
 
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
-
-            # OPTIMIZATION: Return cached if same PID
-            if pid == self._last_pid and self._last_process_name:
-                return self._last_process_name
+    def _get_window_info(self, hwnd) -> tuple:
+        """Get all window info"""
+        with self._cache_lock:
+            if hwnd == self._cache['hwnd']:
+                return self._cache['process'], self._cache['title']
 
             try:
-                # Only create Process object if PID changed
-                process = psutil.Process(pid)
-                process_name = process.name()
+                title = win32gui.GetWindowText(hwnd)
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+
+                try:
+                    process = psutil.Process(pid).name().lower()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    process = None
 
                 # Update cache
-                self._last_hwnd = hwnd
-                self._last_pid = pid
-                self._last_process_name = process_name
+                self._cache.update({
+                    'hwnd': hwnd,
+                    'pid': pid,
+                    'process': process,
+                    'title': title
+                })
 
-                return process_name
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                return None
-        except Exception:
-            return None
+                return process, title
+            except Exception:
+                return None, ""
 
-    def get_active_window_title(self) -> str:
-        """Get window title - OPTIMIZED with caching"""
-        try:
-            hwnd = win32gui.GetForegroundWindow()
-            if hwnd == self._last_hwnd and hasattr(self, '_last_title'):
-                return self._last_title
-
-            title = win32gui.GetWindowText(hwnd)
-            self._last_title = title
-            return title
-        except Exception:
-            return ""
-
-    def is_gta_focused(self) -> bool:
-        """Check if GTA focused - OPTIMIZED"""
-        # Method 1: Check by process name (cached)
-        active_process = self.get_active_window_process()
-        if active_process:
-            # OPTIMIZATION: Use cached lowercase comparison
-            if active_process.lower() == self.process_name_lower:
-                return True
-
-        # Method 2: Check by window title (cached)
-        active_title = self.get_active_window_title()
-        if active_title:
-            active_title_lower = active_title.lower()
-            return any(gta_title.lower() in active_title_lower 
-                      for gta_title in self.gta_window_titles)
-
+    def _check_is_gta(self, process_name, title) -> bool:
+        """Check if window is GTA"""
+        if process_name == self.process_name:
+            return True
+        if title:
+            title_lower = title.lower()
+            return any(gta in title_lower for gta in self.gta_titles)
         return False
+
+    def _on_window_focus_change(self, hook, event, hwnd, id_object, id_child, thread, time):
+        """Windows hook callback"""
+        try:
+            if self._shutdown.is_set():
+                return
+
+            process_name, title = self._get_window_info(hwnd)
+            is_gta = self._check_is_gta(process_name, title)
+
+            # Only trigger callbacks on STATE CHANGE
+            if is_gta != self._is_focused:
+                self._is_focused = is_gta
+
+                for callback in self._callbacks[:]:
+                    THREAD_POOL.submit(self._safe_callback, callback, is_gta)
+
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Focus hook error: {e}")
+
+    def _safe_callback(self, callback, is_focused: bool):
+        """Execute callback with error handling"""
+        try:
+            callback(is_focused)
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Focus callback error: {e}")
 
     def register_focus_callback(self, callback):
         """Register callback"""
-        self._focus_callbacks.append(callback)
+        self._callbacks.append(callback)
 
-    def check_focus_change(self):
-        """Check focus change - OPTIMIZED with thread safety"""
-        current_focus = self.is_gta_focused()
+    def is_gta_focused(self) -> bool:
+        """Get current focus state"""
+        return self._is_focused
 
-        if current_focus != self._last_focus_state:
-            # OPTIMIZATION: Copy list to avoid race condition
-            callbacks = self._focus_callbacks.copy()
+    def force_refresh_focus_state(self):
+        """⭐ NEW: Manually check and update focus state"""
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            process_name, title = self._get_window_info(hwnd)
+            is_gta = self._check_is_gta(process_name, title)
 
-            for callback in callbacks:
+            old_state = self._is_focused
+            self._is_focused = is_gta
+
+            if DEBUG:
+                print(f"[DEBUG] Force refresh: focus={is_gta} (was {old_state})")
+
+            # Trigger callbacks if state changed
+            if is_gta != old_state:
+                for callback in self._callbacks[:]:
+                    THREAD_POOL.submit(self._safe_callback, callback, is_gta)
+
+            return is_gta
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Force refresh error: {e}")
+            return self._is_focused
+
+    def start_monitoring(self):
+        """Start EVENT-DRIVEN monitoring"""
+        def hook_thread():
+            try:
+                user32 = ctypes.windll.user32
+
+                self._hook_id = user32.SetWinEventHook(
+                    self.EVENT_SYSTEM_FOREGROUND,
+                    self.EVENT_SYSTEM_FOREGROUND,
+                    0,
+                    self._hook_func,
+                    0,
+                    0,
+                    self.WINEVENT_OUTOFCONTEXT
+                )
+
+                if not self._hook_id:
+                    raise RuntimeError("Failed to set Windows event hook")
+
+                if DEBUG:
+                    print("[DEBUG] ✓ Windows event hook installed")
+
+                # Check initial state
                 try:
-                    callback(current_focus)
-                except Exception as e:
-                    if DEBUG:
-                        print(f"[DEBUG] Focus callback error: {e}")
+                    hwnd = win32gui.GetForegroundWindow()
+                    self._on_window_focus_change(None, self.EVENT_SYSTEM_FOREGROUND, hwnd, 0, 0, 0, 0)
+                except Exception:
+                    pass
 
-            self._last_focus_state = current_focus
+                # Message loop
+                msg = ctypes.wintypes.MSG()
+                while not self._shutdown.is_set():
+                    if user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, 1):
+                        user32.TranslateMessage(ctypes.byref(msg))
+                        user32.DispatchMessageW(ctypes.byref(msg))
+                    else:
+                        self._shutdown.wait(0.1)
 
-    def start_monitoring(self, interval: float = 2.0):  # CHANGED: 2s instead of 1s
-        """Start monitoring - OPTIMIZED interval"""
-        def monitor():
-            # OPTIMIZATION: Exponential backoff on errors
-            error_count = 0
-            max_errors = 10
+            except Exception as e:
+                if DEBUG:
+                    print(f"[DEBUG] Hook thread error: {e}")
+            finally:
+                if self._hook_id:
+                    user32.UnhookWinEvent(self._hook_id)
 
-            while not self._shutdown_event.is_set() and error_count < max_errors:
-                try:
-                    self.check_focus_change()
-                    error_count = 0  # Reset on success
-                except Exception as e:
-                    error_count += 1
-                    if DEBUG:
-                        print(f"[DEBUG] Focus monitor error: {e}")
-
-                    # Exponential backoff on repeated errors
-                    if error_count > 3:
-                        self._shutdown_event.wait(min(interval * error_count, 30))
-                        continue
-
-                self._shutdown_event.wait(interval)
-
-        self._monitor_thread = threading.Thread(target=monitor, daemon=True)
-        self._monitor_thread.start()
+        threading.Thread(target=hook_thread, daemon=True, name="focus_monitor").start()
 
     def stop_monitoring(self):
         """Stop monitoring"""
-        self._shutdown_event.set()
-        if self._monitor_thread:
-            self._monitor_thread.join(timeout=3.0)
-
+        self._shutdown.set()
 
 
 class SoundManager:
-    """Manages sound effects for the application"""
+    """Manages sound effects - OPTIMIZED with thread pool"""
 
     SOUND_FILES = {'on': 'on.wav', 'off': 'off.wav', 'toggle': 'toggle.wav'}
 
-    def __init__(self) -> None:
+    def __init__(self):
         self.sounds_dir = ASSETS_DIR / "assets" / "sounds"
         self.sounds_dir.mkdir(parents=True, exist_ok=True)
 
-        # Load sound paths and check existence
         self.sounds = {}
         for key, filename in self.SOUND_FILES.items():
             path = self.sounds_dir / filename
-            self.sounds[key] = {'path': str(path), 'exists': path.exists()}
+            self.sounds[key] = str(path) if path.exists() else None
 
-            if not self.sounds[key]['exists']:
-                console.print(f"[yellow]⚠[/yellow] Sound file not found: {path}", style="dim")
+    def play(self, sound_type: str):
+        """Play sound asynchronously using thread pool"""
+        path = self.sounds.get(sound_type)
+        if path:
+            THREAD_POOL.submit(self._play_sound, path)
 
     @staticmethod
-    def _play(path: str) -> None:
-        """Play sound asynchronously"""
-        def _target() -> None:
-            try:
-                winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            except Exception:
-                pass
+    def _play_sound(path: str):
+        """Internal sound player"""
+        try:
+            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        except Exception:
+            pass
 
-        threading.Thread(target=_target, daemon=True).start()
-
-    def play(self, sound_type: str) -> None:
-        """Play a sound by type (on/off/toggle)"""
-        if sound_type in self.sounds and self.sounds[sound_type]['exists']:
-            self._play(self.sounds[sound_type]['path'])
-
-    def play_on(self) -> None:
+    def play_on(self):
         self.play('on')
 
-    def play_off(self) -> None:
+    def play_off(self):
         self.play('off')
 
-    def play_toggle(self) -> None:
+    def play_toggle(self):
         self.play('toggle')
-
-    def get_loaded_count(self) -> int:
-        """Return count of successfully loaded sounds"""
-        return sum(1 for sound in self.sounds.values() if sound['exists'])
-
 
 
 class FirewallManager:
-    """Manages firewall rules for blocking/unblocking IPs"""
+    """Manages firewall rules"""
 
     def __init__(self, config: AppConfig):
         self.rule_name = config.rule_name
@@ -350,27 +361,24 @@ class FirewallManager:
     def rule_exists(self) -> bool:
         """Check if firewall rule exists"""
         cmd = f'netsh advfirewall firewall show rule name="{self.rule_name}"'
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, 
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                               creationflags=subprocess.CREATE_NO_WINDOW)
         return "No rules match the specified criteria" not in result.stdout
 
     def test_ip_blocked(self, timeout: float = 2) -> bool:
-        """Test if IP is blocked by attempting connection"""
+        """Test if IP is blocked"""
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.settimeout(timeout)
-                result = sock.connect_ex((self.remote_ip, self.test_port))
-                return result != 0
+                return sock.connect_ex((self.remote_ip, self.test_port)) != 0
         except Exception:
             return True
 
-    def add_rule(self, manager: OverlayManager, sound_manager: SoundManager) -> None:
+    def add_rule(self, manager: OverlayManager, sound_manager: SoundManager):
         """Add firewall blocking rule"""
-        cmd = (
-            f'netsh advfirewall firewall add rule name="{self.rule_name}" '
-            f'dir=out action=block remoteip="{self.remote_ip}"'
-        )
-        subprocess.run(cmd, shell=True, capture_output=True, 
+        cmd = (f'netsh advfirewall firewall add rule name="{self.rule_name}" '
+               f'dir=out action=block remoteip="{self.remote_ip}"')
+        subprocess.run(cmd, shell=True, capture_output=True,
                       creationflags=subprocess.CREATE_NO_WINDOW)
 
         time.sleep(0.5)
@@ -381,18 +389,16 @@ class FirewallManager:
             sound_manager.play_on()
 
             if self.test_ip_blocked():
-                console.print(
-                    f"✓ Connection to [cyan]{self.remote_ip}:{self.test_port}[/cyan] "
-                    f"is [bold red]BLOCKED[/bold red]", style="green"
-                )
+                console.print(f"✓ Connection to [cyan]{self.remote_ip}:{self.test_port}[/cyan] "
+                            f"is [bold red]BLOCKED[/bold red]", style="green")
         else:
             console.print("✗ Failed to add firewall rule", style="red")
         console.print()
 
-    def delete_rule(self, manager: OverlayManager, sound_manager: SoundManager) -> None:
+    def delete_rule(self, manager: OverlayManager, sound_manager: SoundManager):
         """Remove firewall blocking rule"""
         cmd = f'netsh advfirewall firewall delete rule name="{self.rule_name}"'
-        subprocess.run(cmd, shell=True, capture_output=True, 
+        subprocess.run(cmd, shell=True, capture_output=True,
                       creationflags=subprocess.CREATE_NO_WINDOW)
 
         time.sleep(0.5)
@@ -403,16 +409,14 @@ class FirewallManager:
             sound_manager.play_off()
 
             if not self.test_ip_blocked():
-                console.print(
-                    f"✓ Connection to [cyan]{self.remote_ip}:{self.test_port}[/cyan] "
-                    f"is [bold green]ACCESSIBLE[/bold green]", style="green"
-                )
+                console.print(f"✓ Connection to [cyan]{self.remote_ip}:{self.test_port}[/cyan] "
+                            f"is [bold green]ACCESSIBLE[/bold green]", style="green")
         else:
             console.print("✗ Failed to delete firewall rule", style="red")
         console.print()
 
-    def toggle_rule(self, manager: OverlayManager, sound_manager: SoundManager) -> None:
-        """Toggle firewall rule on/off"""
+    def toggle_rule(self, manager: OverlayManager, sound_manager: SoundManager):
+        """Toggle firewall rule"""
         if self.rule_exists():
             self.delete_rule(manager, sound_manager)
         else:
@@ -422,11 +426,10 @@ class FirewallManager:
         """Cleanup firewall rule on exit"""
         if self.rule_exists():
             cmd = f'netsh advfirewall firewall delete rule name="{self.rule_name}"'
-            subprocess.run(cmd, shell=True, capture_output=True, 
+            subprocess.run(cmd, shell=True, capture_output=True,
                           creationflags=subprocess.CREATE_NO_WINDOW)
             return True
         return False
-
 
 
 class ProcessManager:
@@ -441,57 +444,46 @@ class ProcessManager:
             return False
 
     @staticmethod
-    def run_as_admin() -> None:
-        """Restart script with admin privileges, preserving original directory"""
+    def run_as_admin():
+        """Restart script with admin privileges"""
         if ProcessManager.is_admin():
             return
 
-        # Use the BASE_DIR we calculated above
         current_dir = str(BASE_DIR)
         executable = sys.executable
-        
-        # Build arguments correctly for both Script and EXE modes
+
         if hasattr(sys, 'frozen') or "__compiled__" in globals():
-            # For EXE: Just pass the original arguments
             params = " ".join([f'"{arg}"' for arg in sys.argv[1:]])
         else:
-            # For Script: Must pass the script path (sys.argv[0]) first
             params = f'"{sys.argv[0]}" ' + " ".join([f'"{arg}"' for arg in sys.argv[1:]])
 
         try:
-            # The 'current_dir' here is what keeps your config.yaml out of Temp/System32
-            ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", executable, params, current_dir, 1
-            )
+            ctypes.windll.shell32.ShellExecuteW(None, "runas", executable, params, current_dir, 1)
         except Exception as e:
             console.print(f"[red]Failed to elevate: {e}[/red]")
-            
+
         sys.exit()
 
     @staticmethod
-    def kill_process(process_name: str, manager: OverlayManager) -> None:
+    def kill_process(process_name: str, manager: OverlayManager):
         """Kill a process by name"""
         try:
-            result = subprocess.run(
-                f'taskkill /F /IM {process_name}',
-                shell=True, capture_output=True, text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
+            result = subprocess.run(f'taskkill /F /IM {process_name}', shell=True,
+                                  capture_output=True, text=True,
+                                  creationflags=subprocess.CREATE_NO_WINDOW)
 
             if result.returncode == 0:
                 console.print(f"✓ {process_name} process [bold red]KILLED[/bold red]", style="green")
-                manager.show_notification("PROCESS TERMINATED", 
+                manager.show_notification("PROCESS TERMINATED",
                                         f"{process_name} has been closed", "#ef4444")
             else:
-                console.print(f"✗ {process_name} process not found or already closed", 
-                            style="yellow")
-                manager.show_notification("PROCESS NOT FOUND", 
+                console.print(f"✗ {process_name} process not found or already closed", style="yellow")
+                manager.show_notification("PROCESS NOT FOUND",
                                         f"{process_name} is not running", "#f59e0b")
         except Exception as e:
             console.print(f"✗ Failed to kill {process_name}: {e}", style="red")
             manager.show_notification("ERROR", f"Failed to terminate {process_name}", "#ef4444")
         console.print()
-
 
 
 class SolverManager:
@@ -500,31 +492,27 @@ class SolverManager:
     def __init__(self, manager: OverlayManager):
         self.manager = manager
 
-    def _run_solver(self, solver_func, name: str, emoji: str) -> None:
+    def _run_solver(self, solver_func, name: str):
         """Generic solver runner"""
-        if not SOLVERS_AVAILABLE:
-            console.print("[red]✗[/red] Hack modules not available", style="red")
-            return
 
         console.print(f"[cyan]➤[/cyan] Running {name}...", style="cyan")
         self.manager.show_notification(name, "Active", "#a855f7")
         bbox = self.manager.get_window_bbox()
 
         if bbox:
-            Thread(target=solver_func, args=(bbox,), daemon=True).start()
+            THREAD_POOL.submit(solver_func, bbox)
 
-    def casino_fingerprint(self) -> None:
-        self._run_solver(casinofingerprint.main, "CASINO SOLVER 🎰", "Fingerprint hack")
+    def casino_fingerprint(self):
+        self._run_solver(casinofingerprint.main, "CASINO SOLVER 🎰")
 
-    def casino_keypad(self) -> None:
-        self._run_solver(casinokeypad.main, "CASINO SOLVER 🎰", "Keypad hack")
+    def casino_keypad(self):
+        self._run_solver(casinokeypad.main, "CASINO SOLVER 🎰")
 
-    def cayo_fingerprint(self) -> None:
-        self._run_solver(cayofingerprint.main, "CAYO PERICO 🏝️", "Fingerprint hack")
+    def cayo_fingerprint(self):
+        self._run_solver(cayofingerprint.main, "CAYO PERICO 🏝️")
 
-    def cayo_voltage(self) -> None:
-        self._run_solver(cayovoltage.main, "CAYO PERICO 🏝️", "Voltage hack")
-
+    def cayo_voltage(self):
+        self._run_solver(cayovoltage.main, "CAYO PERICO 🏝️")
 
 
 class ExploitManager:
@@ -533,13 +521,8 @@ class ExploitManager:
     def __init__(self, manager: OverlayManager):
         self.manager = manager
 
-    def job_warp(self) -> None:
+    def job_warp(self):
         """Execute job warp exploit"""
-        if not JOBWARP_AVAILABLE:
-            console.print("[red]✗[/red] Job warp module not available", style="red")
-            self.manager.show_notification("ERROR", "Job warp not available", "#ef4444")
-            return
-
         bbox = self.manager.get_window_bbox()
         if not bbox:
             console.print("[red]✗[/red] GTA V window not found", style="red")
@@ -548,8 +531,7 @@ class ExploitManager:
 
         console.print("[cyan]➤[/cyan] Triggering Job Warp exploit...", style="cyan")
         self.manager.show_notification("JOB WARP 🚀", "Exploit triggered", "#c084fc")
-        Thread(target=jobwarp.main, args=(bbox, self.manager), daemon=True).start()
-
+        THREAD_POOL.submit(jobwarp.main, bbox, self.manager)
 
 
 class UpdateChecker:
@@ -561,26 +543,23 @@ class UpdateChecker:
     RELEASES_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases"
 
     def __init__(self, current_version: str):
-        self.current_version = current_version.lstrip('v')  # Remove 'v' prefix if present
+        self.current_version = current_version.lstrip('v')
         self.latest_version = None
         self.update_available = False
         self.download_url = None
 
     @staticmethod
     def _parse_version(version_str: str) -> tuple:
-        """Parse version string to tuple for comparison"""
+        """Parse version string to tuple"""
         try:
-            # Remove 'v' prefix and split by '.'
-            clean_version = version_str.lstrip('v').split('-')[0]  # Handle v2.9-beta etc
-            parts = clean_version.split('.')
-            return tuple(int(p) for p in parts)
+            clean_version = version_str.lstrip('v').split('-')[0]
+            return tuple(int(p) for p in clean_version.split('.'))
         except (ValueError, AttributeError):
             return (0, 0, 0)
 
     def check_for_updates(self, timeout: int = 3) -> bool:
-        """Check if a newer version is available on GitHub"""
+        """Check if newer version is available"""
         try:
-            # Create request with timeout
             req = urllib.request.Request(
                 self.API_URL,
                 headers={'User-Agent': f'{self.REPO_NAME}/{self.current_version}'}
@@ -590,11 +569,9 @@ class UpdateChecker:
                 if response.status == 200:
                     data = json.loads(response.read().decode('utf-8'))
 
-                    # Get latest version from tag_name
                     self.latest_version = data.get('tag_name', '').lstrip('v')
                     self.download_url = data.get('html_url', self.RELEASES_URL)
 
-                    # Compare versions
                     current = self._parse_version(self.current_version)
                     latest = self._parse_version(self.latest_version)
 
@@ -607,16 +584,6 @@ class UpdateChecker:
             return False
 
         return False
-
-    def get_update_message(self) -> str:
-        """Get formatted update message"""
-        if self.update_available and self.latest_version:
-            return (
-                f"🔔 Update Available: v{self.latest_version} "
-                f"(Current: v{self.current_version})\n"
-                f"Download: {self.download_url}"
-            )
-        return ""
 
     def print_update_notification(self):
         """Print update notification if available"""
@@ -636,12 +603,11 @@ class UpdateChecker:
             console.print()
 
 
-
 class UIManager:
-    """Manages UI display and instructions"""
+    """Manages UI display"""
 
     @staticmethod
-    def print_header() -> None:
+    def print_header():
         """Print application header"""
         console.clear()
         console.print()
@@ -651,19 +617,19 @@ class UIManager:
         title.append(" | ", style="white")
         title.append(VERSION, style="dim yellow")
 
-        console.print(Panel(Align.center(title), box=box.DOUBLE, 
+        console.print(Panel(Align.center(title), box=box.DOUBLE,
                           border_style="bright_cyan", padding=(0, 2)))
         console.print()
 
     @staticmethod
     def _format_hotkey(hotkey_str: str) -> str:
-        """Format hotkey string for display"""
+        """Format hotkey string"""
         parts = [p.strip().upper() for p in hotkey_str.split('+')]
         return ' + '.join(parts)
 
     @staticmethod
-    def print_hotkeys(config: AppConfig) -> None:
-        """Print hotkeys table from config"""
+    def print_hotkeys(config: AppConfig):
+        """Print hotkeys table"""
         hotkeys_table = Table(
             title="🎮  [bold]Hotkeys[/bold]",
             box=box.ROUNDED, border_style="magenta",
@@ -674,73 +640,43 @@ class UIManager:
 
         hk = config.hotkeys
 
-        # Core hotkeys
-        hotkeys_table.add_row(
-            UIManager._format_hotkey(hk['toggle_overlay']), 
-            "Toggle overlay mode (Full ↔ Mini)"
-        )
-        hotkeys_table.add_row(
-            UIManager._format_hotkey(hk['toggle_nosave']), 
-            "Toggle NOSAVE (ON ↔ OFF)"
-        )
-        hotkeys_table.add_row(
-            UIManager._format_hotkey(hk['debug_toggle']), 
-            "🐛 Toggle Debug Mode"
-        )
+        hotkeys_table.add_row(UIManager._format_hotkey(hk['toggle_overlay']),
+                            "Toggle overlay mode (Full ↔ Mini)")
+        hotkeys_table.add_row(UIManager._format_hotkey(hk['toggle_nosave']),
+                            "Toggle NOSAVE (ON ↔ OFF)")
+        hotkeys_table.add_row(UIManager._format_hotkey(hk['debug_toggle']),
+                            "🐛 Toggle Debug Mode")
         hotkeys_table.add_row("", "")
 
-        # Tool hotkeys
-        hotkeys_table.add_row(
-            UIManager._format_hotkey(hk['autoclicker']), 
-            "⚡ Toggle Fast Autoclicker (50 CPS)"
-        )
-        hotkeys_table.add_row(
-            UIManager._format_hotkey(hk['snack_spammer']), 
-            "🍔 Toggle Snack Spammer (Hold TAB)"
-        )
-        hotkeys_table.add_row(
-            UIManager._format_hotkey(hk['anti_afk']), 
-            "🎮 Toggle Anti-AFK (S+A ↔ S+D)"
-        )
-        hotkeys_table.add_row(
-            UIManager._format_hotkey(hk['kill_gta']), 
-            "💀 Kill GTA5 Process (Instant)"
-        )
+        hotkeys_table.add_row(UIManager._format_hotkey(hk['autoclicker']),
+                            "⚡ Toggle Fast Autoclicker (50 CPS)")
+        hotkeys_table.add_row(UIManager._format_hotkey(hk['snack_spammer']),
+                            "🍔 Toggle Snack Spammer (Hold TAB)")
+        hotkeys_table.add_row(UIManager._format_hotkey(hk['anti_afk']),
+                            "🎮 Toggle Anti-AFK (S+A ↔ S+D)")
+        hotkeys_table.add_row(UIManager._format_hotkey(hk['kill_gta']),
+                            "💀 Kill GTA5 Process (Instant)")
 
-        # Optional features
-        if JOBWARP_AVAILABLE:
-            hotkeys_table.add_row("", "")
-            hotkeys_table.add_row(
-                UIManager._format_hotkey(hk['job_warp']), 
-                "🚀 Job Warp Exploit (Toggle)"
-            )
+        hotkeys_table.add_row("", "")
+        hotkeys_table.add_row(UIManager._format_hotkey(hk['job_warp']),
+                            "🚀 Job Warp Exploit (Toggle)")
 
-        if SOLVERS_AVAILABLE:
-            hotkeys_table.add_row("", "")
-            hotkeys_table.add_row(
-                UIManager._format_hotkey(hk['casino_fingerprint']), 
-                "Casino Fingerprint Solver"
-            )
-            hotkeys_table.add_row(
-                UIManager._format_hotkey(hk['casino_keypad']), 
-                "Casino Keypad Solver"
-            )
-            hotkeys_table.add_row(
-                UIManager._format_hotkey(hk['cayo_fingerprint']), 
-                "Cayo Perico Fingerprint Solver"
-            )
-            hotkeys_table.add_row(
-                UIManager._format_hotkey(hk['cayo_voltage']), 
-                "Cayo Perico Voltage Solver"
-            )
+        hotkeys_table.add_row("", "")
+        hotkeys_table.add_row(UIManager._format_hotkey(hk['casino_fingerprint']),
+                            "Casino Fingerprint Solver")
+        hotkeys_table.add_row(UIManager._format_hotkey(hk['casino_keypad']),
+                            "Casino Keypad Solver")
+        hotkeys_table.add_row(UIManager._format_hotkey(hk['cayo_fingerprint']),
+                            "Cayo Perico Fingerprint Solver")
+        hotkeys_table.add_row(UIManager._format_hotkey(hk['cayo_voltage']),
+                            "Cayo Perico Voltage Solver")
 
         console.print(hotkeys_table)
         console.print()
 
     @staticmethod
-    def print_status(config: AppConfig) -> None:
-
-        # Running status
+    def print_status(config: AppConfig):
+        """Print running status"""
         console.print(
             Panel(
                 "[bold green]●[/bold green] Script is running... "
@@ -752,9 +688,8 @@ class UIManager:
         console.print()
 
 
-
 class HotkeyHandler:
-    """Handles all hotkey detection and routing - ROBUST version"""
+    """Handles hotkey detection - FORCES focus refresh after restart"""
 
     def __init__(
         self,
@@ -777,37 +712,38 @@ class HotkeyHandler:
         self.anti_afk = anti_afk
         self.solver_manager = solver_manager
         self.exploit_manager = exploit_manager
-        self.current_keys: set = set()
-        self._triggered_combos: set = set()  # CHANGED: Just track which actions were triggered
+
+        self.current_keys = set()
+        self.triggered = set()
         self._lock = threading.Lock()
 
-        # Initialize window focus manager
+        self._listener = None
+        self._listener_lock = threading.Lock()
+        self._should_run = True
+
+        # Focus manager
         self.focus_manager = WindowFocusManager(GTA_PROCESS_NAME)
         self.require_game_focus = config.require_game_focus
         self.auto_stop_on_unfocus = config.auto_stop_on_unfocus
 
-        # Register focus change callback
         if self.auto_stop_on_unfocus:
             self.focus_manager.register_focus_callback(self._on_focus_change)
             self.focus_manager.start_monitoring()
 
-        # Parse hotkeys into key combination sets
+        # Pre-compute hotkeys
         self.hotkeys = {}
         for action, hotkey_str in config.hotkeys.items():
-            self.hotkeys[action] = self._parse_hotkey_to_set(hotkey_str)
+            self.hotkeys[action] = self._parse_hotkey(hotkey_str)
             if DEBUG:
                 print(f"[DEBUG] Parsed {action}: {hotkey_str} -> {self.hotkeys[action]}")
 
-    def _parse_hotkey_to_set(self, hotkey_str: str) -> set:
-        """Parse hotkey string - USE from_char() for character keys"""
+    def _parse_hotkey(self, hotkey_str: str) -> frozenset:
+        """Parse hotkey"""
         parts = [p.strip().lower() for p in hotkey_str.split('+')]
-        key_set = set()
+        keys = set()
 
-        # Map of string to keyboard keys
         key_map = {
-            'ctrl': keyboard.Key.ctrl,
-            'alt': keyboard.Key.alt,
-            'shift': keyboard.Key.shift,
+            'ctrl': keyboard.Key.ctrl, 'alt': keyboard.Key.alt, 'shift': keyboard.Key.shift,
             'f1': keyboard.Key.f1, 'f2': keyboard.Key.f2, 'f3': keyboard.Key.f3,
             'f4': keyboard.Key.f4, 'f5': keyboard.Key.f5, 'f6': keyboard.Key.f6,
             'f7': keyboard.Key.f7, 'f8': keyboard.Key.f8, 'f9': keyboard.Key.f9,
@@ -817,18 +753,13 @@ class HotkeyHandler:
         }
 
         for part in parts:
-            if part in key_map:
-                key_set.add(key_map[part])
-            else:
-                # Use from_char() to create KeyCode
-                key_set.add(keyboard.KeyCode.from_char(part))
+            keys.add(key_map.get(part, keyboard.KeyCode.from_char(part)))
 
-        return key_set
+        return frozenset(keys)
 
     def _normalize_key(self, key):
-        """Normalize keys - MUST match parsing method"""
+        """Normalize key"""
         try:
-            # Normalize modifier keys (treat left and right as same)
             if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
                 return keyboard.Key.ctrl
             if key in (keyboard.Key.alt_l, keyboard.Key.alt_r, keyboard.Key.alt_gr):
@@ -836,158 +767,169 @@ class HotkeyHandler:
             if key in (keyboard.Key.shift_l, keyboard.Key.shift_r):
                 return keyboard.Key.shift
 
-            # For character keys with vk code
             if hasattr(key, 'vk') and key.vk:
-                # Convert VK codes to characters, then use from_char()
-                if 65 <= key.vk <= 90:  # A-Z
-                    char = chr(key.vk + 32)  # lowercase
-                    return keyboard.KeyCode.from_char(char)
-                elif 48 <= key.vk <= 57:  # 0-9
-                    char = chr(key.vk)
-                    return keyboard.KeyCode.from_char(char)
+                if 65 <= key.vk <= 90:
+                    return keyboard.KeyCode.from_char(chr(key.vk + 32))
+                elif 48 <= key.vk <= 57:
+                    return keyboard.KeyCode.from_char(chr(key.vk))
 
-            # If key has char attribute, use from_char()
             if hasattr(key, 'char') and key.char:
                 return keyboard.KeyCode.from_char(key.char.lower())
 
-            # For function keys and special keys, return as-is
             return key
-
-        except Exception as e:
-            if DEBUG:
-                print(f"[DEBUG] Key normalization error: {e}")
+        except Exception:
             return key
 
     def _on_focus_change(self, is_focused: bool):
-        """Called when GTA focus state changes"""
-        try:
-            if not is_focused:
-                stopped_tools = []
+        """Handle focus change"""
+        if not is_focused:
+            stopped = []
 
-                if self.autoclicker.active:
-                    self.autoclicker.stop()
-                    stopped_tools.append("Auto Clicker")
-
-                if self.snack_spammer.active:
-                    self.snack_spammer.stop()
-                    stopped_tools.append("Snack Spammer")
-
-                if self.anti_afk.active:
-                    self.anti_afk.stop()
-                    stopped_tools.append("Anti-AFK")
-
-                # Clear keyboard state on focus loss
-                with self._lock:
-                    self.current_keys.clear()
-                    self._triggered_combos.clear()
-
-                if stopped_tools:
-                    tools_str = ", ".join(stopped_tools)
-                    console.print(f"[yellow]⏸[/yellow] Alt+Tab detected - Stopped: {tools_str}",
-                                style="yellow")
-                    self.manager.show_notification(
-                        "AUTO-STOPPED",
-                        f"Tools paused: {tools_str}",
-                        "#f59e0b"
-                    )
-
-                    if DEBUG:
-                        print(f"[DEBUG] Focus lost - Stopped tools: {tools_str}")
-            else:
-                if DEBUG:
-                    print("[DEBUG] GTA regained focus")
-        except Exception as e:
-            if DEBUG:
-                print(f"[DEBUG] Focus callback error: {e}")
-
-    def _toggle_overlay_mode(self) -> None:
-        self.manager.toggle_mode()
-        self.sound_manager.play_toggle()
-
-        if self.manager.show_full:
-            console.print("◉ Switched to [bold cyan]FULL[/bold cyan] overlay mode", style="blue")
-            self.manager.show_notification("OVERLAY MODE", "Full display enabled", "#3b82f6")
-        else:
-            console.print("◉ Switched to [bold cyan]MINI[/bold cyan] overlay mode (glowing indicator)",
-                        style="blue")
-            self.manager.show_notification("OVERLAY MODE", "Compact indicator active", "#3b82f6")
-        console.print()
-
-    def _toggle_debug(self) -> None:
-        global DEBUG
-        DEBUG = not DEBUG
-        status = "ENABLED" if DEBUG else "DISABLED"
-        console.print(f"🐛 DEBUG MODE [bold]{status}[/bold]", style="yellow")
-        self.manager.show_notification("DEBUG MODE 🐛", status, "#f59e0b")
-        console.print()
-
-    def on_press(self, key) -> None:
-        """Handle key press events - IMPROVED logic"""
-        try:
-            normalized_key = self._normalize_key(key)
-
-            if DEBUG:
-                print(f"[DEBUG] Key pressed: {key} -> {normalized_key}")
+            for tool, name in [(self.autoclicker, "Auto Clicker"),
+                             (self.snack_spammer, "Snack Spammer"),
+                             (self.anti_afk, "Anti-AFK")]:
+                if tool.active:
+                    tool.stop()
+                    stopped.append(name)
 
             with self._lock:
-                # Add key to current set
-                self.current_keys.add(normalized_key)
+                self.current_keys.clear()
+                self.triggered.clear()
+
+            if stopped:
+                tools_str = ", ".join(stopped)
+                console.print(f"[yellow]⏸[/yellow] Alt+Tab detected - Stopped: {tools_str}",
+                            style="yellow")
+                self.manager.show_notification("AUTO-STOPPED",
+                                             f"Tools paused: {tools_str}", "#f59e0b")
+                if DEBUG:
+                    print(f"[DEBUG] Focus lost - Stopped: {tools_str}")
+        else:
+            if DEBUG:
+                print("[DEBUG] GTA regained focus - restarting listener...")
+
+            with self._lock:
+                self.current_keys.clear()
+                self.triggered.clear()
+
+            THREAD_POOL.submit(self._restart_listener)
+
+    def _restart_listener(self):
+        """Restart listener + force focus refresh"""
+        try:
+            with self._listener_lock:
+                # Stop old listener
+                if self._listener is not None:
+                    try:
+                        self._listener.stop()
+                        if DEBUG:
+                            print("[DEBUG] Stopped old listener")
+                    except Exception as e:
+                        if DEBUG:
+                            print(f"[DEBUG] Error stopping listener: {e}")
+
+                time.sleep(0.2)
+
+                # Start new listener
+                self._listener = keyboard.Listener(
+                    on_press=self.on_press,
+                    on_release=self.on_release,
+                    suppress=False
+                )
+                self._listener.start()
+
+                if DEBUG:
+                    print("[DEBUG] ✓ Listener restarted")
+
+            # ⭐ CRITICAL: Force refresh focus state after restart
+            time.sleep(0.1)  # Let listener initialize
+            is_focused = self.focus_manager.force_refresh_focus_state()
+
+            if DEBUG:
+                print(f"[DEBUG] Focus state after restart: {is_focused}")
+
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Failed to restart listener: {e}")
+
+    def on_press(self, key):
+        """Handle key press"""
+        try:
+            normalized = self._normalize_key(key)
+
+            if DEBUG:
+                print(f"[DEBUG] Key pressed: {key} -> {normalized}")
+
+            with self._lock:
+                self.current_keys.add(normalized)
 
                 if DEBUG:
                     print(f"[DEBUG]   Current keys: {self.current_keys}")
-                    print(f"[DEBUG]   Triggered combos: {self._triggered_combos}")
+                    print(f"[DEBUG]   GTA focused: {self.focus_manager.is_gta_focused()}")
 
-                # Check if GTA is focused (if required)
+                # Skip if focus required but not focused
                 if self.require_game_focus and not self.focus_manager.is_gta_focused():
                     if DEBUG:
                         print("[DEBUG]   GTA not focused - ignoring")
                     return
 
-                # Check if any hotkey combination is now complete
-                for action, key_combo in self.hotkeys.items():
-                    # Skip if already triggered
-                    if action in self._triggered_combos:
-                        continue
-
-                    # Check if combo is pressed
-                    if key_combo.issubset(self.current_keys):
-                        # Mark as triggered
-                        self._triggered_combos.add(action)
+                # Check hotkey matches
+                current_frozen = frozenset(self.current_keys)
+                for action, combo in self.hotkeys.items():
+                    if action not in self.triggered and combo.issubset(current_frozen):
+                        self.triggered.add(action)
 
                         if DEBUG:
                             print(f"[DEBUG] ✓✓✓ HOTKEY MATCHED: {action}")
-                            print(f"[DEBUG]   Expected: {key_combo}")
-                            print(f"[DEBUG]   Current: {self.current_keys}")
 
-                        # Execute action in separate thread to avoid blocking
-                        threading.Thread(
-                            target=self._handle_action,
-                            args=(action,),
-                            daemon=True
-                        ).start()
-
-                        break  # Only trigger one action per keypress
+                        THREAD_POOL.submit(self._handle_action, action)
+                        break
 
         except Exception as e:
             if DEBUG:
-                print(f"[DEBUG] on_press error: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"[DEBUG] Key press error: {e}")
 
-    def _handle_action(self, action: str) -> None:
-        """Route action to appropriate handler"""
+    def on_release(self, key):
+        """Handle key release"""
+        try:
+            normalized = self._normalize_key(key)
+
+            if DEBUG:
+                print(f"[DEBUG] Key released: {key} -> {normalized}")
+
+            with self._lock:
+                self.current_keys.discard(normalized)
+
+                current_frozen = frozenset(self.current_keys)
+                to_clear = [
+                    action for action in self.triggered
+                    if normalized in self.hotkeys[action] or not self.hotkeys[action].issubset(current_frozen)
+                ]
+
+                for action in to_clear:
+                    self.triggered.discard(action)
+
+                if DEBUG and to_clear:
+                    print(f"[DEBUG]   Cleared combos: {to_clear}")
+
+        except Exception as e:
+            if DEBUG:
+                print(f"[DEBUG] Key release error: {e}")
+
+    def _handle_action(self, action: str):
+        """Route action to handler"""
         try:
             handlers = {
-                'toggle_overlay': self._toggle_overlay_mode,
+                'toggle_overlay': self._toggle_overlay,
                 'toggle_nosave': lambda: self.firewall_manager.toggle_rule(
                     self.manager, self.sound_manager),
                 'debug_toggle': self._toggle_debug,
                 'autoclicker': lambda: self._toggle_tool(
                     self.autoclicker, "AUTO CLICKER ⚡"),
                 'snack_spammer': lambda: self._toggle_tool(
-                    self.snack_spammer, "SNACK SPAMMER 🍔", extra=" (Hold TAB)"),
+                    self.snack_spammer, "SNACK SPAMMER 🍔", " (Hold TAB)"),
                 'anti_afk': lambda: self._toggle_tool(
-                    self.anti_afk, "ANTI-AFK 🎮", extra=" (S+A ↔ S+D)"),
+                    self.anti_afk, "ANTI-AFK 🎮", " (S+A ↔ S+D)"),
                 'kill_gta': lambda: ProcessManager.kill_process(GTA_PROCESS_NAME, self.manager),
                 'job_warp': self.exploit_manager.job_warp,
                 'casino_fingerprint': self.solver_manager.casino_fingerprint,
@@ -1001,100 +943,69 @@ class HotkeyHandler:
                 handler()
         except Exception as e:
             if DEBUG:
-                print(f"[DEBUG] Action handler error for {action}: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"[DEBUG] Action handler error: {e}")
 
-    def _toggle_tool(self, tool, name: str, extra: str = "") -> None:
-        """Toggle a tool on/off"""
+    def _toggle_overlay(self):
+        """Toggle overlay"""
+        self.manager.toggle_mode()
+        self.sound_manager.play_toggle()
+
+        if self.manager.show_full:
+            console.print("◉ Switched to [bold cyan]FULL[/bold cyan] overlay mode", style="blue")
+            self.manager.show_notification("OVERLAY MODE", "Full display enabled", "#3b82f6")
+        else:
+            console.print("◉ Switched to [bold cyan]MINI[/bold cyan] overlay mode", style="blue")
+            self.manager.show_notification("OVERLAY MODE", "Compact indicator active", "#3b82f6")
+        console.print()
+
+    def _toggle_debug(self):
+        """Toggle debug"""
+        global DEBUG
+        DEBUG = not DEBUG
+        status = "ENABLED" if DEBUG else "DISABLED"
+        console.print(f"🐛 DEBUG MODE [bold]{status}[/bold]", style="yellow")
+        self.manager.show_notification("DEBUG MODE 🐛", status, "#f59e0b")
+        console.print()
+
+    def _toggle_tool(self, tool, name: str, extra: str = ""):
+        """Toggle tool"""
+        tool.toggle()
+        if tool.active:
+            console.print(f"[bold green]✓ {name} ENABLED{extra}[/bold green]")
+            self.manager.show_notification(name, f"ENABLED{extra}", "#10b981")
+        else:
+            console.print(f"[bold red]✗ {name} DISABLED[/bold red]")
+            self.manager.show_notification(name, "DISABLED", "#ef4444")
+
+    def start_listening(self):
+        """Start listener"""
+        if DEBUG:
+            print("[DEBUG] Starting initial keyboard listener...")
+
         try:
-            console.print(f"[bold green]✓ HOTKEY DETECTED - TOGGLING {name}[/bold green]")
-            tool.toggle()
-            if tool.active:
-                self.manager.show_notification(name, f"ENABLED{extra}", "#10b981")
-            else:
-                self.manager.show_notification(name, "DISABLED", "#ef4444")
-        except Exception as e:
-            if DEBUG:
-                print(f"[DEBUG] Tool toggle error: {e}")
-
-    def on_release(self, key) -> None:
-        """Handle key release events - IMPROVED: Clear combos when ANY key released"""
-        try:
-            normalized_key = self._normalize_key(key)
-
-            if DEBUG:
-                print(f"[DEBUG] Key released: {key} -> {normalized_key}")
-
-            with self._lock:
-                # Remove key from current set
-                self.current_keys.discard(normalized_key)
-
-                if DEBUG:
-                    print(f"[DEBUG]   Remaining keys: {self.current_keys}")
-
-                # IMPROVED: Clear ALL triggered combos that included this key
-                combos_to_clear = []
-                for action in list(self._triggered_combos):
-                    key_combo = self.hotkeys[action]
-
-                    # If this combo contained the released key
-                    if normalized_key in key_combo:
-                        combos_to_clear.append(action)
-                        if DEBUG:
-                            print(f"[DEBUG]   Clearing combo {action} (contained released key)")
-                    # OR if the combo is no longer fully pressed
-                    elif not key_combo.issubset(self.current_keys):
-                        combos_to_clear.append(action)
-                        if DEBUG:
-                            print(f"[DEBUG]   Clearing combo {action} (no longer fully pressed)")
-
-                # Clear the combos
-                for action in combos_to_clear:
-                    self._triggered_combos.discard(action)
-
-                if DEBUG and combos_to_clear:
-                    print(f"[DEBUG]   Cleared {len(combos_to_clear)} combo(s)")
-                    print(f"[DEBUG]   Remaining triggered: {self._triggered_combos}")
-
-        except Exception as e:
-            if DEBUG:
-                print(f"[DEBUG] on_release error: {e}")
-                import traceback
-                traceback.print_exc()
-
-    def start_listening(self) -> None:
-        """Start the keyboard listener with error recovery"""
-        while True:
-            try:
-                if DEBUG:
-                    print("[DEBUG] Starting keyboard listener...")
-
-                with keyboard.Listener(
+            with self._listener_lock:
+                self._listener = keyboard.Listener(
                     on_press=self.on_press,
                     on_release=self.on_release,
                     suppress=False
-                ) as listener:
-                    listener.join()
+                )
+                self._listener.start()
 
-            except Exception as e:
-                if DEBUG:
-                    print(f"[DEBUG] Keyboard listener died: {e}")
-                    import traceback
-                    traceback.print_exc()
+            if DEBUG:
+                print("[DEBUG] ✓ Listener started")
 
+            while self._should_run:
                 time.sleep(1)
-                if DEBUG:
-                    print("[DEBUG] Restarting keyboard listener...")
 
+        except KeyboardInterrupt:
+            self._should_run = False
+        finally:
+            with self._listener_lock:
+                if self._listener:
+                    self._listener.stop()
 
-def cleanup(
-    autoclicker: AutoClicker,
-    snack_spammer: SnackSpammer,
-    anti_afk: AntiAFK,
-    firewall_manager: FirewallManager
-) -> None:
-    """Cleanup all resources before exit"""
+def cleanup(autoclicker, snack_spammer, anti_afk, firewall_manager):
+    """Cleanup resources"""
     for tool in (autoclicker, snack_spammer, anti_afk):
         if tool.active:
             tool.stop()
@@ -1103,38 +1014,62 @@ def cleanup(
         console.print("\n✓ Cleanup: Firewall rule removed", style="green")
 
 
-
-def disable_console_quickedit() -> None:
-    """Silently disable Windows console QuickEdit mode to prevent click-freeze"""
+def disable_console_quickedit():
+    """Aggressively disable Windows console QuickEdit mode to prevent input freeze"""
     if sys.platform != "win32":
         return
 
     try:
         kernel32 = ctypes.windll.kernel32
-        h_console = kernel32.GetStdHandle(-10)
+        h_console = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        
         mode = ctypes.c_uint32()
         kernel32.GetConsoleMode(h_console, ctypes.byref(mode))
-        kernel32.SetConsoleMode(h_console, mode.value & ~0x0040 & ~0x0020 | 0x0080)
-    except Exception:
-        pass
+        
+        # Disable ALL interactive modes
+        ENABLE_QUICK_EDIT_MODE = 0x0040
+        ENABLE_INSERT_MODE = 0x0020
+        ENABLE_MOUSE_INPUT = 0x0010
+        ENABLE_EXTENDED_FLAGS = 0x0080
+        
+        new_mode = mode.value
+        new_mode &= ~ENABLE_QUICK_EDIT_MODE
+        new_mode &= ~ENABLE_INSERT_MODE
+        new_mode &= ~ENABLE_MOUSE_INPUT
+        new_mode |= ENABLE_EXTENDED_FLAGS
+        
+        kernel32.SetConsoleMode(h_console, new_mode)
+        
+        if DEBUG:
+            print(f"[DEBUG] Console mode changed: {mode.value:04x} -> {new_mode:04x}")
+            
+    except Exception as e:
+        if DEBUG:
+            print(f"[DEBUG] Failed to disable QuickEdit: {e}")
 
 
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    """Global exception handler to prevent crashes"""
+    if DEBUG:
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+    else:
+        console.print(f"[red]✗ Critical error: {exc_value}[/red]")
 
-def main() -> None:
-    """Main application entry point"""
+
+def main():
+    """Main application entry point - OPTIMIZED"""
     global DEBUG
 
-    # Check for debug flag
+    # Set global exception handler
+    sys.excepthook = global_exception_handler
+
     if "--debug" in sys.argv:
         DEBUG = True
         console.print("[bold yellow]🐛 DEBUG MODE ENABLED[/bold yellow]")
         console.print()
 
-    # Ensure admin privileges
     ProcessManager.run_as_admin()
     ctypes.windll.user32.SetProcessDPIAware()
-
-    # Prevent console click-freeze
     disable_console_quickedit()
 
     # Load configuration
@@ -1157,7 +1092,7 @@ def main() -> None:
     # Display UI
     UIManager.print_header()
 
-    # Check for updates (non-blocking with timeout)
+    # Check for updates
     console.print("[dim]⏳ Checking for updates...[/dim]", end="")
     update_checker = UpdateChecker(VERSION)
     if update_checker.check_for_updates():
@@ -1180,12 +1115,12 @@ def main() -> None:
         autoclicker, snack_spammer, anti_afk, solver_manager, exploit_manager
     )
 
-    # Register cleanup on exit
+    # Register cleanup
     atexit.register(cleanup, autoclicker, snack_spammer, anti_afk, firewall_manager)
 
     # Start listener thread
-    listener_thread = threading.Thread(target=hotkey_handler.start_listening, daemon=True)
-    listener_thread.start()
+    threading.Thread(target=hotkey_handler.start_listening, daemon=True,
+                    name="hotkey_listener").start()
 
     # Run overlay manager (blocks until exit)
     try:
@@ -1193,8 +1128,8 @@ def main() -> None:
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠[/yellow] Shutting down...", style="bold")
     finally:
+        THREAD_POOL.shutdown(wait=False)
         console.print("✓ Script terminated successfully\n", style="green bold")
-
 
 
 if __name__ == "__main__":

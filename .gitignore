@@ -209,3 +209,5 @@ build.md
 VKit.exe
 /test
 main2.py
+*.exe
+*.zip
