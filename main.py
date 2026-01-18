@@ -32,7 +32,7 @@ from core.ui import UIManager, UpdateChecker
 console = Console()
 
 # Constants
-VERSION = "v3.3.3"
+VERSION = "v3.3.4"
 APP_TITLE = "VKit - Toolbox"
 
 THREAD_POOL = ThreadPoolExecutor(max_workers=15, thread_name_prefix="vkit_worker")
@@ -395,17 +395,25 @@ class HotkeyHandler:
                         print("[DEBUG]   GTA not focused - ignoring")
                     return
 
-                # Check hotkey matches
+                # Check hotkey matches - PRIORITIZE LONGEST COMBINATIONS
                 current_frozen = frozenset(self.current_keys)
-                for action, combo in self.hotkeys.items():
-                    if action not in self.triggered and combo.issubset(current_frozen):
-                        self.triggered.add(action)
+                
+                # Find all matching hotkeys and select the longest one
+                matches = [
+                    (action, combo) 
+                    for action, combo in self.hotkeys.items()
+                    if action not in self.triggered and combo.issubset(current_frozen)
+                ]
+                
+                if matches:
+                    # Sort by combination length (descending) and take the first
+                    action, combo = max(matches, key=lambda x: len(x[1]))
+                    self.triggered.add(action)
 
-                        if DEBUG:
-                            print(f"[DEBUG] ✓✓✓ HOTKEY MATCHED: {action}")
+                    if DEBUG:
+                        print(f"[DEBUG] ✓✓✓ HOTKEY MATCHED: {action}")
 
-                        THREAD_POOL.submit(self._handle_action, action)
-                        break
+                    THREAD_POOL.submit(self._handle_action, action)
 
         except Exception as e:
             if DEBUG:

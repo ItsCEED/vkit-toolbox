@@ -281,13 +281,15 @@ class FirewallManager:
         self.test_port = test_port
 
     def rule_exists(self) -> bool:
-        """Check if firewall rule exists."""
+        """Check if firewall rule exists"""
         result = subprocess.run(
             f'netsh advfirewall firewall show rule name="{self.rule_name}"',
-            shell=True, capture_output=True, text=True,
+            shell=True, 
+            capture_output=True, 
+            text=True,
             creationflags=subprocess.CREATE_NO_WINDOW
         )
-        return "No rules match the specified criteria" not in result.stdout
+        return result.returncode == 0
 
     def test_ip_blocked(self, timeout: float = 2) -> bool:
         """Test if IP is blocked."""
